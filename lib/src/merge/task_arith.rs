@@ -7,7 +7,7 @@
 //! All operations are pure Rust, no I/O, operating on `&[f32]` slices.
 
 use crate::error::{Error, Result};
-use std::collections::HashMap;
+
 
 // ---------------------------------------------------------------------------
 // Task vectors
@@ -178,7 +178,7 @@ pub fn ties_merge(task_vectors: &[&[f32]], config: &TiesConfig) -> Result<Vec<f3
     }
 
     let dim = task_vectors[0].len();
-    let n = task_vectors.len();
+    let _n = task_vectors.len();
 
     // Step 1: Trim each task vector.
     let trimmed: Vec<Vec<f32>> = task_vectors
@@ -208,7 +208,7 @@ pub fn ties_merge(task_vectors: &[&[f32]], config: &TiesConfig) -> Result<Vec<f3
                 continue; // already trimmed — skip
             }
             let val_sign = if val > 0.0 { 1.0 } else { -1.0 };
-            if (val_sign - signs[i]).abs() < f36::EPSILON as f32 {
+            if val_sign == signs[i] {
                 sum += val;
                 count += 1;
             }

@@ -3,7 +3,7 @@
 
 pub(crate) mod lookup;
 mod par;
-mod scalar;
+pub(crate) mod scalar;
 #[cfg(target_arch = "x86_64")]
 mod simd;
 

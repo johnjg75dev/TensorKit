@@ -40,13 +40,17 @@ pub use analysis::{
 };
 pub use error::{Error, Result};
 pub use merge::{
-    apply_tying as merge_apply_tying, average_into, average_tensors, insert_block,
-    merge_experts, plan_tying, slerp_tensors, verify_tying_compatible, InsertPlan,
-    InsertResult, InsertSource, MergeStrategy, MoEMergeStrategy, MoEWeights, SlerpT,
-    TyingPlan, TyingResult, WeightFormat,
+    apply_task_vector, apply_task_vector_owned, apply_tying as merge_apply_tying, average_into,
+    average_tensors, compute_task_vector, elect_sign, insert_block, merge_experts, plan_tying,
+    slerp_tensors, ties_merge, trim_task_vector, verify_tying_compatible, InsertPlan,
+    InsertResult, InsertSource, MergeStrategy, MoEMergeStrategy, MoEWeights, MultiplierHub,
+    SlerpT, TaskEntry, TiesConfig, TyingPlan, TyingResult, WeightFormat,
 };
 pub use model::{BlockRef, MetadataValue, Model, ModelFormat, Tensor, TensorDtype};
-pub use prune::{build_plan, parse_selection, PrunePlan, PruneReport, Selection};
+pub use prune::{
+    apply_embed_prune, build_plan, parse_selection, plan_embed_prune, EmbedPrunePlan,
+    PrunePlan, PruneReport, Selection, TokenSelection,
+};
 pub use quantize::{is_quantizable, quantize};
 pub use report::render_html_report;
 pub use svd::{

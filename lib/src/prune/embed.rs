@@ -9,11 +9,10 @@
 //! to stay consistent with the reduced vocab size.
 
 use crate::error::{Error, Result};
-use crate::formats::gguf::dequant::scalar::{scan_bf16, scan_f16};
 use crate::formats::gguf::dequant::dequantize;
+use crate::formats::gguf::dequant::scalar::{scan_bf16, scan_f16};
 use crate::formats::gguf::types::GgmlType;
 use crate::model::{Model, TensorDtype};
-use std::borrow::Cow;
 use std::collections::{HashMap, HashSet};
 use std::io::BufRead;
 
@@ -386,7 +385,7 @@ fn dtype_to_ggml(dt: TensorDtype) -> Result<GgmlType> {
 
 /// Extract specific rows from a row-major `[rows, cols]` f32 slice.
 /// Returns the bytes of the new tensor (f32, little-endian).
-fn extract_rows(data: &[f32], rows: usize, cols: usize, keep: &[u32]) -> Vec<u8> {
+fn extract_rows(data: &[f32], _rows: usize, cols: usize, keep: &[u32]) -> Vec<u8> {
     let mut out = Vec::with_capacity(keep.len() * cols * 4);
     for &row_idx in keep {
         let start = row_idx as usize * cols;
