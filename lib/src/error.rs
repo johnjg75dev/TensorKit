@@ -51,4 +51,10 @@ pub enum Error {
 
     #[error("protobuf error: {0}")]
     Protobuf(#[from] prost::DecodeError),
+
+    #[error("task arithmetic error: {0}")]
+    TaskArith(String),
+
+    #[error("embedding prune error: {0}")]
+    EmbedPrune(String),
 }
