@@ -39,7 +39,7 @@ fn find_best_grid(target: &[f32; 8], expanded: &[[i8; 8]; 2048]) -> usize {
 }
 
 pub fn quantize(src: &[f32]) -> Vec<u8> {
-    debug_assert!(src.len() % QK_K == 0);
+    debug_assert!(src.len().is_multiple_of(QK_K));
     let mut out = Vec::with_capacity(src.len() / QK_K * BLOCK_BYTES);
     let expanded = expand_iq1s_grid();
 

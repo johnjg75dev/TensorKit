@@ -5,8 +5,8 @@
 //! - 64 bytes: qs[] — quantized values, each byte holds 4× 2-bit quants (0-3)
 //! - 2 bytes: f16 d — super-block scale
 //! - 16 bytes: scales[] — each byte packs:
-//!     lower 4 bits = sub-block scale (sc)
-//!     upper 4 bits = sub-block min (mn)
+//!   lower 4 bits = sub-block scale (sc)
+//!   upper 4 bits = sub-block min (mn)
 //!
 //! Dequant formula: x = d * (q * sc - mn)
 
@@ -20,7 +20,7 @@ const N_SUB: usize = QK_K / SUB;
 const BLOCK_BYTES: usize = 82;
 
 pub fn quantize(src: &[f32]) -> Vec<u8> {
-    debug_assert!(src.len() % QK_K == 0);
+    debug_assert!(src.len().is_multiple_of(QK_K));
     let mut out = Vec::with_capacity(src.len() / QK_K * BLOCK_BYTES);
     for blk in src.chunks_exact(QK_K) {
         let overall_max = blk.iter().fold(0.0f32, |m, &v| m.max(v.abs()));

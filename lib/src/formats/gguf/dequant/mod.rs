@@ -18,11 +18,10 @@ pub fn dequantize(ty: GgmlType, bytes: &[u8], max_elems: Option<usize>) -> Optio
 
     #[cfg(target_arch = "x86_64")]
     {
-        if is_x86_feature_detected!("avx2") && is_x86_feature_detected!("f16c") {
-            if let Some(v) = unsafe { simd::try_dequant(ty, bytes, max) } {
+        if is_x86_feature_detected!("avx2") && is_x86_feature_detected!("f16c")
+            && let Some(v) = unsafe { simd::try_dequant(ty, bytes, max) } {
                 return Some(v);
             }
-        }
     }
     scalar::dequantize(ty, bytes, max)
 }
@@ -35,11 +34,10 @@ pub fn dequantize_par(ty: GgmlType, bytes: &[u8], max_elems: Option<usize>) -> O
 
     #[cfg(target_arch = "x86_64")]
     {
-        if is_x86_feature_detected!("avx2") && is_x86_feature_detected!("f16c") {
-            if let Some(v) = unsafe { simd::try_dequant(ty, bytes, max) } {
+        if is_x86_feature_detected!("avx2") && is_x86_feature_detected!("f16c")
+            && let Some(v) = unsafe { simd::try_dequant(ty, bytes, max) } {
                 return Some(v);
             }
-        }
     }
     par::dequantize_par(ty, bytes, max)
 }

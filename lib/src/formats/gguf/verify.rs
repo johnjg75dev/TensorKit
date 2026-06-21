@@ -71,13 +71,12 @@ pub fn verify(path: &Path, expected_names: &[String]) -> Result<VerifyReport> {
             ));
         }
     }
-    if let Some((_, e, last)) = ranges.last() {
-        if *e > file_size {
+    if let Some((_, e, last)) = ranges.last()
+        && *e > file_size {
             report.errors.push(format!(
                 "last tensor '{last}' ends at {e} past file size {file_size}"
             ));
         }
-    }
 
     if gguf.tensors.is_empty() {
         report.warnings.push("no tensors in pruned file".into());

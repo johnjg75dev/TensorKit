@@ -38,7 +38,7 @@ fn encode_4(t0: u8, t1: u8, t2: u8, t3: u8) -> u8 {
 }
 
 pub fn quantize(src: &[f32]) -> Vec<u8> {
-    debug_assert!(src.len() % ELEMS == 0);
+    debug_assert!(src.len().is_multiple_of(ELEMS));
     let mut out = Vec::with_capacity(src.len() / ELEMS * BLOCK_BYTES);
 
     for blk in src.chunks_exact(ELEMS) {
@@ -51,7 +51,7 @@ pub fn quantize(src: &[f32]) -> Vec<u8> {
 
         for j in 0..32 {
             let t0 = if d == 0.0 { 1u8 } else {
-                let raw = (blk[j * 5 + 0] * inv_d).round();
+                let raw = (blk[j * 5] * inv_d).round();
                 if raw >= 1.0 { 2 } else if raw <= -1.0 { 0 } else { 1 }
             };
             let t1 = if d == 0.0 { 1u8 } else {
@@ -75,7 +75,7 @@ pub fn quantize(src: &[f32]) -> Vec<u8> {
 
         for j in 0..4 {
             let t0 = if d == 0.0 { 1u8 } else {
-                let raw = (blk[160 + j * 4 + 0] * inv_d).round();
+                let raw = (blk[160 + j * 4] * inv_d).round();
                 if raw >= 1.0 { 2 } else if raw <= -1.0 { 0 } else { 1 }
             };
             let t1 = if d == 0.0 { 1u8 } else {

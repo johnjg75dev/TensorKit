@@ -4,7 +4,7 @@
 //! Element j in pair p = j / 2, slot s = j % 2:
 //!   - qs[p] holds the low 4 bits of both (lo nibble = slot 0).
 //!   - qh bit 2*p is high bit of slot 0, bit 2*p + 1 is high bit of slot 1.
-//! Dequant: x = d * n + m; n in [0, 31] so range is [m, m + 31d].
+//!     Dequant: x = d * n + m; n in [0, 31] so range is [m, m + 31d].
 
 use crate::formats::gguf::dequant::f16_to_f32;
 use crate::quantize::f32_to_f16_bits;
@@ -13,7 +13,7 @@ const BLOCK: usize = 32;
 const BLOCK_BYTES: usize = 24;
 
 pub fn quantize(src: &[f32]) -> Vec<u8> {
-    debug_assert!(src.len() % BLOCK == 0);
+    debug_assert!(src.len().is_multiple_of(BLOCK));
     let mut out = Vec::with_capacity(src.len() / BLOCK * BLOCK_BYTES);
     for blk in src.chunks_exact(BLOCK) {
         let (lo_v, hi_v) = blk
@@ -31,7 +31,7 @@ pub fn quantize(src: &[f32]) -> Vec<u8> {
         for j in 0..BLOCK {
             let n = quant_one(blk[j], m, inv_d) as u32;
             let lo = (n & 0x0F) as u8;
-            let hi = ((n >> 4) & 0x01) as u32;
+            let hi = (n >> 4) & 0x01;
             let p = j / 2;
             let s = j % 2;
             if s == 0 {

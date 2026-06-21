@@ -1,8 +1,5 @@
 //! Pure-Rust linear-algebra primitives used by the SVD compressor.
 //!
-//! We deliberately avoid `ndarray` / `nalgebra` / LAPACK to keep the binary
-//! lean. The two algorithms implemented here are:
-//!
 //! * **One-sided Jacobi SVD** — accurate, simple, fast for matrices up to a
 //!   few thousand rows/columns (the size of typical transformer attention /
 //!   FFN projections).
@@ -13,6 +10,7 @@
 //! passed alongside. Element `(i, j)` is at index `i * n_cols + j`.
 
 use crate::error::{Error, Result};
+use rayon::prelude::*;
 use std::alloc::{alloc, dealloc, Layout};
 use std::ptr::NonNull;
 
@@ -47,6 +45,10 @@ impl<T> AlignedVec<T> {
 
     pub fn len(&self) -> usize {
         self.len
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.len == 0
     }
 
     pub fn set_len(&mut self, len: usize) {
@@ -439,7 +441,6 @@ pub fn evd_symmetric(a: &Mat, max_sweeps: usize, tol: f64) -> Result<(Vec<f32>, 
 }
 
 /// Run one-sided Jacobi SVD on a row-major matrix `a` (m x n).
-
 ///
 /// `max_sweeps` caps the number of full sweeps (one sweep = n*(n-1)/2 pair
 /// rotations). `tol` is the convergence threshold on the off-diagonal
@@ -465,41 +466,77 @@ pub fn svd_jacobi(a: &Mat, max_sweeps: usize, tol: f64) -> Result<Svd> {
     let mut sweep = 0;
     let target_off = (a.norm_fro() * a.norm_fro()) * tol * tol;
 
+    // Build independent pair batches using greedy graph coloring.
+    // Pairs sharing no column can rotate in parallel.
+    let all_pairs: Vec<(usize, usize)> = (0..n).flat_map(|i| ((i + 1)..n).map(move |j| (i, j))).collect();
+    let mut batches: Vec<Vec<(usize, usize)>> = Vec::new();
+
+    for &(i, j) in &all_pairs {
+        let mut placed = None;
+        for b in 0..batches.len() {
+            let mut ok = true;
+            for &(pi, pj) in &batches[b] {
+                if pi == i || pi == j || pj == i || pj == j {
+                    ok = false;
+                    break;
+                }
+            }
+            if ok {
+                placed = Some(b);
+                break;
+            }
+        }
+        let b = placed.unwrap_or_else(|| {
+            batches.push(Vec::new());
+            batches.len() - 1
+        });
+        batches[b].push((i, j));
+    }
+
     while sweep < max_sweeps {
         sweep += 1;
         let mut off_sq = 0.0f64;
 
-        for i in 0..n {
-            for j in (i + 1)..n {
-                let mut alpha = 0.0f64;
-                let mut beta  = 0.0f64;
-                let mut gamma = 0.0f64;
+        for batch in &batches {
+            // Compute rotations for all independent pairs in parallel.
+            let rotations: Vec<(usize, usize, f64, f64, f64)> = batch
+                .par_iter()
+                .map(|&(i, j)| {
+                    let mut alpha = 0.0f64;
+                    let mut beta  = 0.0f64;
+                    let mut gamma = 0.0f64;
 
-                let mut r = 0;
-                while r + 4 <= m {
-                    let x0 = work_f64[r * n + i];
-                    let y0 = work_f64[r * n + j];
-                    let x1 = work_f64[(r + 1) * n + i];
-                    let y1 = work_f64[(r + 1) * n + j];
-                    let x2 = work_f64[(r + 2) * n + i];
-                    let y2 = work_f64[(r + 2) * n + j];
-                    let x3 = work_f64[(r + 3) * n + i];
-                    let y3 = work_f64[(r + 3) * n + j];
+                    let mut r = 0;
+                    while r + 4 <= m {
+                        let x0 = work_f64[r * n + i];
+                        let y0 = work_f64[r * n + j];
+                        let x1 = work_f64[(r + 1) * n + i];
+                        let y1 = work_f64[(r + 1) * n + j];
+                        let x2 = work_f64[(r + 2) * n + i];
+                        let y2 = work_f64[(r + 2) * n + j];
+                        let x3 = work_f64[(r + 3) * n + i];
+                        let y3 = work_f64[(r + 3) * n + j];
 
-                    alpha += x0 * x0 + x1 * x1 + x2 * x2 + x3 * x3;
-                    beta  += y0 * y0 + y1 * y1 + y2 * y2 + y3 * y3;
-                    gamma += x0 * y0 + x1 * y1 + x2 * y2 + x3 * y3;
+                        alpha += x0 * x0 + x1 * x1 + x2 * x2 + x3 * x3;
+                        beta  += y0 * y0 + y1 * y1 + y2 * y2 + y3 * y3;
+                        gamma += x0 * y0 + x1 * y1 + x2 * y2 + x3 * y3;
 
-                    r += 4;
-                }
-                for rr in r..m {
-                    let x = work_f64[rr * n + i];
-                    let y = work_f64[rr * n + j];
-                    alpha += x * x;
-                    beta  += y * y;
-                    gamma += x * y;
-                }
+                        r += 4;
+                    }
+                    for rr in r..m {
+                        let x = work_f64[rr * n + i];
+                        let y = work_f64[rr * n + j];
+                        alpha += x * x;
+                        beta  += y * y;
+                        gamma += x * y;
+                    }
 
+                    (i, j, alpha, beta, gamma)
+                })
+                .collect();
+
+            // Accumulate off-norm and apply rotations sequentially (columns shared across batches).
+            for &(i, j, alpha, beta, gamma) in &rotations {
                 off_sq += gamma * gamma;
 
                 if gamma.abs() < 1e-30 {
@@ -580,7 +617,7 @@ pub fn svd_jacobi(a: &Mat, max_sweeps: usize, tol: f64) -> Result<Svd> {
 /// Returns `(cos, sin)` such that the rotation `R = [[c, s], [-s, c]]`
 /// satisfies `R^T * M * R = diag(a', b')` with `a' >= b'`.
 #[inline]
-fn jacobi_2x2(a: f64, b: f64, g: f64) -> (f64, f64) {
+pub fn jacobi_2x2(a: f64, b: f64, g: f64) -> (f64, f64) {
     if g.abs() < 1e-30 {
         return (1.0, 0.0);
     }
@@ -690,7 +727,7 @@ pub fn svd_randomized(
     Ok(Svd { u, s: s_k, vt })
 }
 
-fn transpose(a: &Mat) -> Mat {
+pub fn transpose(a: &Mat) -> Mat {
     let mut t = Mat::new(a.cols, a.rows);
     for i in 0..a.rows {
         for j in 0..a.cols {
@@ -700,7 +737,7 @@ fn transpose(a: &Mat) -> Mat {
     t
 }
 
-pub(crate) fn slice_cols(a: &Mat, start: usize, count: usize) -> Mat {
+pub fn slice_cols(a: &Mat, start: usize, count: usize) -> Mat {
     let mut out = Mat::new(a.rows, count);
     for r in 0..a.rows {
         for c in 0..count {
@@ -710,7 +747,7 @@ pub(crate) fn slice_cols(a: &Mat, start: usize, count: usize) -> Mat {
     out
 }
 
-pub(crate) fn slice_rows(a: &Mat, start: usize, count: usize) -> Mat {
+pub fn slice_rows(a: &Mat, start: usize, count: usize) -> Mat {
     let mut out = Mat::new(count, a.cols);
     for r in 0..count {
         for c in 0..a.cols {
@@ -720,7 +757,7 @@ pub(crate) fn slice_rows(a: &Mat, start: usize, count: usize) -> Mat {
     out
 }
 
-fn orthonormalize_cols(a: &Mat) -> Mat {
+pub fn orthonormalize_cols(a: &Mat) -> Mat {
     let m = a.rows;
     let n = a.cols;
     // Use classical Gram-Schmidt (CGS) with two passes of re-orthogonalization.

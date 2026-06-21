@@ -30,7 +30,7 @@ fn grid_entries() -> Vec<[i8; 4]> {
 }
 
 pub fn quantize(src: &[f32]) -> Vec<u8> {
-    debug_assert!(src.len() % BLOCK_LEN == 0);
+    debug_assert!(src.len().is_multiple_of(BLOCK_LEN));
     let mut out = Vec::with_capacity(src.len() / BLOCK_LEN * BLOCK_BYTES);
     let grid = grid_entries();
 
@@ -71,13 +71,13 @@ pub fn quantize(src: &[f32]) -> Vec<u8> {
                 0u8
             } else {
                 let s = ((group_max[g_lo] / (d.abs() * MAX_GRID_VAL) - 1.0) / 2.0).ceil() as i32;
-                s.max(0).min(15) as u8
+                s.clamp(0, 15) as u8
             };
             let scale_hi = if d == 0.0 || group_max[g_hi] == 0.0 {
                 0u8
             } else {
                 let s = ((group_max[g_hi] / (d.abs() * MAX_GRID_VAL) - 1.0) / 2.0).ceil() as i32;
-                s.max(0).min(15) as u8
+                s.clamp(0, 15) as u8
             };
 
             scales[ib32 / 2] = scale_lo | (scale_hi << 4);

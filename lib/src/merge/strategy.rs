@@ -19,18 +19,15 @@ impl MergeStrategy {
 
 /// In-memory layout of a 2-D weight matrix.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Default)]
 pub enum WeightFormat {
     /// Row-major: row index varies slowest.
+    #[default]
     RowMajor,
     /// Column-major: column index varies slowest.
     ColMajor,
 }
 
-impl Default for WeightFormat {
-    fn default() -> Self {
-        Self::RowMajor
-    }
-}
 
 #[cfg(test)]
 #[path = "../../tests/unit/merge/strategy.rs"]

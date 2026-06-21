@@ -82,17 +82,15 @@ pub fn quantize_gguf(
             .tensor_slice(ti)
             .ok_or_else(|| Error::Gguf(format!("tensor '{}' not in mmap", ti.name)))?;
         // Block selection: skip tensors not in the selected blocks.
-        if let Some(allowed) = blocks {
-            if let Some(idx) = block_index_from_name(&ti.name) {
-                if !allowed.contains(&idx) {
+        if let Some(allowed) = blocks
+            && let Some(idx) = block_index_from_name(&ti.name)
+                && !allowed.contains(&idx) {
                     writer.add_tensor(ti.name.clone(), ti.n_dims, ti.dims, ti.ggml_type, src_bytes);
                     n_p += 1;
                     total_in += ti.byte_size;
                     total_out += ti.byte_size;
                     continue;
                 }
-            }
-        }
         let n_elems = dims_product(&ti.dims, ti.n_dims);
         if ti.ggml_type == target {
             // Pass-through.
@@ -210,7 +208,7 @@ fn build_meta(target: GgmlType) -> Vec<MetadataKv> {
     ]
 }
 
-fn max_abs_diff(a: &[f32], b: &[f32]) -> f32 {
+pub fn max_abs_diff(a: &[f32], b: &[f32]) -> f32 {
     a.iter()
         .zip(b)
         .map(|(x, y)| (x - y).abs())
@@ -218,7 +216,7 @@ fn max_abs_diff(a: &[f32], b: &[f32]) -> f32 {
 }
 
 /// If `name` has the form `blk.<idx>.<rest>`, returns `Some(idx)`.
-fn block_index_from_name(name: &str) -> Option<i32> {
+pub fn block_index_from_name(name: &str) -> Option<i32> {
     let rest = name.strip_prefix("blk.")?;
     let idx_str = rest.split('.').next()?;
     idx_str.parse().ok()

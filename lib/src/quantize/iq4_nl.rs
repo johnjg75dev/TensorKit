@@ -29,7 +29,7 @@ fn nearest_idx(target: f32) -> u8 {
 }
 
 pub fn quantize(src: &[f32]) -> Vec<u8> {
-    debug_assert!(src.len() % BLOCK_LEN == 0);
+    debug_assert!(src.len().is_multiple_of(BLOCK_LEN));
     let mut out = Vec::with_capacity(src.len() / BLOCK_LEN * BLOCK_BYTES);
     for blk in src.chunks_exact(BLOCK_LEN) {
         let block_max = blk.iter().fold(f32::NEG_INFINITY, |a, &b| a.max(b));

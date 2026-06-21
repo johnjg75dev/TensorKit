@@ -69,16 +69,14 @@ pub fn build_plan<M: Model + ?Sized>(model: &M, cfg: &SvdConfig) -> Result<SvdPl
         if role != BlockRole::Block {
             continue;
         }
-        if let Some(set) = &allowed_blocks {
-            if !set.contains(&idx) {
+        if let Some(set) = &allowed_blocks
+            && !set.contains(&idx) {
                 continue;
             }
-        }
-        if let LayerSelection::Pattern(re) = &cfg.layers {
-            if !re.is_match(&t.name) {
+        if let LayerSelection::Pattern(re) = &cfg.layers
+            && !re.is_match(&t.name) {
                 continue;
             }
-        }
         // Convenience aliases: only act on the relevant suffix family.
         match &cfg.layers {
             LayerSelection::AllAttn | LayerSelection::AllFfn | LayerSelection::AllMlp => {

@@ -373,7 +373,7 @@ pub fn byte_size_for(n_elements: u64, ty: GgmlType) -> u64 {
     let block_elems = ty.block_size() as u64;
     match ty.block_bytes() {
         Some(b) => {
-            let n_blocks = (n_elements + block_elems - 1) / block_elems;
+            let n_blocks = n_elements.div_ceil(block_elems);
             n_blocks * b as u64
         }
         None => n_elements * ty_size_guess(ty) as u64,

@@ -57,4 +57,7 @@ pub enum Error {
 
     #[error("embedding prune error: {0}")]
     EmbedPrune(String),
+
+    #[error("inference error: {0}")]
+    Infer(String),
 }

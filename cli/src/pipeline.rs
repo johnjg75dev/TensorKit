@@ -161,29 +161,16 @@ pub fn run_interactive() -> Result<(), crate::Error> {
         }
         eprintln!("────────────────────────────────────────────\n");
 
-        let items = if dirty {
-            vec![
-                "Set model path",
-                "Add step",
-                "Remove step",
-                "Reorder steps",
-                "Save config",
-                "Load config",
-                "Run pipeline",
-                "Exit",
-            ]
-        } else {
-            vec![
-                "Set model path",
-                "Add step",
-                "Remove step",
-                "Reorder steps",
-                "Save config",
-                "Load config",
-                "Run pipeline",
-                "Exit",
-            ]
-        };
+        let items = vec![
+            "Set model path",
+            "Add step",
+            "Remove step",
+            "Reorder steps",
+            "Save config",
+            "Load config",
+            "Run pipeline",
+            "Exit",
+        ];
 
         let sel = Select::new()
             .with_prompt("Main menu")
@@ -343,7 +330,7 @@ fn reorder_steps(cfg: &mut PipelineConfig) -> Result<(), crate::Error> {
 
     // Interpret the returned indices
     // Sort::interact() returns indices in user-chosen order.
-    let old_steps = std::mem::replace(&mut cfg.steps, Vec::new());
+    let old_steps = std::mem::take(&mut cfg.steps);
     for &idx in &order {
         if idx < old_steps.len() {
             cfg.steps.push(old_steps[idx].clone());
@@ -615,7 +602,8 @@ fn execute_pipeline(cfg: &PipelineConfig) -> Result<(), crate::Error> {
                 let tensors = selection.as_deref().unwrap_or("mlp");
                 let rank_str = rank.as_deref().unwrap_or("0.5,min:4");
                 let dtype = "f16";
-                run_svd(m, layers, tensors, rank_str, dtype, 16, None, out, verify.unwrap_or(false), false)?;
+                let backend = "faer";
+                run_svd(m, layers, tensors, rank_str, dtype, backend, 16, None, out, verify.unwrap_or(false), false)?;
                 model = Some(out.clone());
             }
             PipelineStep::Merge { models, out, weights, slerp, verify: _verify } => {

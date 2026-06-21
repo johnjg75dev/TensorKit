@@ -6,8 +6,8 @@
 //! Scope:
 //!   - Per-block: Q4_0, Q4_1, Q5_0, Q5_1, Q8_0
 //!   - K-quants:  Q4_K, Q5_K, Q6_K (Q8_K dequant exists but no quantizer
-//!                — it's only useful for round-trip and is rarely used as
-//!                a storage format since it's not smaller than F16).
+//!     — it's only useful for round-trip and is rarely used as
+//!     a storage format since it's not smaller than F16).
 //!   - I-quants:  not yet implemented.
 //!
 //! The K-quant quantizers match the canonical llama.cpp on-disk layout
@@ -59,7 +59,7 @@ pub fn quantize(src: &[f32], ty: GgmlType) -> Vec<u8> {
     let block = ty.block_size();
     if block > 1 {
         assert!(
-            src.len() % block == 0,
+            src.len().is_multiple_of(block),
             "input length {} is not a multiple of block size {} for {:?}",
             src.len(),
             block,
@@ -69,18 +69,17 @@ pub fn quantize(src: &[f32], ty: GgmlType) -> Vec<u8> {
 
     #[cfg(target_arch = "x86_64")]
     {
-        if is_x86_feature_detected!("avx2") && is_x86_feature_detected!("fma") {
-            if let Some(v) = unsafe { simd::try_quantize(src, ty) } {
+        if is_x86_feature_detected!("avx2") && is_x86_feature_detected!("fma")
+            && let Some(v) = unsafe { simd::try_quantize(src, ty) } {
                 return v;
             }
-        }
     }
 
     dispatch_quantize(src, ty)
 }
 
 #[inline(never)]
-fn dispatch_quantize(src: &[f32], ty: GgmlType) -> Vec<u8> {
+pub fn dispatch_quantize(src: &[f32], ty: GgmlType) -> Vec<u8> {
     match ty {
         GgmlType::Q2K => q2_k::quantize(src),
         GgmlType::Q3K => q3_k::quantize(src),

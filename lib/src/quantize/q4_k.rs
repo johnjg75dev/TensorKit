@@ -8,8 +8,8 @@
 //! For sub-blocks 0..3 (j < 4):
 //!   - sc[j] = scales[j] & 0x3F           (low 6 bits of byte j)
 //!   - mn[j] = scales[4 + j] & 0x3F       (low 6 bits of byte 4+j)
-//! The high 2 bits of scales[0..3] and scales[4..7] are "spillover" slots
-//! holding the high 2 bits of the next-half sc[4..7] and mn[4..7].
+//!     The high 2 bits of scales[0..3] and scales[4..7] are "spillover" slots
+//!     holding the high 2 bits of the next-half sc[4..7] and mn[4..7].
 //!
 //! For sub-blocks 4..7 (j >= 4), the "shared low-4" trick: the low 4 bits
 //! of sc[j] and mn[j] are the SAME byte (scales[8 + (j-4)]), while the
@@ -45,7 +45,7 @@ fn pack_qs(qs: &mut [u8; 128], j: usize, n: u8) {
 }
 
 pub fn quantize(src: &[f32]) -> Vec<u8> {
-    debug_assert!(src.len() % QK_K == 0);
+    debug_assert!(src.len().is_multiple_of(QK_K));
     let mut out = Vec::with_capacity(src.len() / QK_K * BLOCK_BYTES);
     for blk in src.chunks_exact(QK_K) {
         // Pick d, dmin from the block: d covers the positive side, dmin
@@ -136,7 +136,7 @@ pub fn quantize(src: &[f32]) -> Vec<u8> {
                             if d_sc == 0.0 {
                                 continue;
                             }
-                            let q = ((v + m_sc) / d_sc).round().clamp(0.0, 15.0) as f32;
+                            let q = ((v + m_sc) / d_sc).round().clamp(0.0, 15.0);
                             let recon = d_sc * q - m_sc;
                             let e = (v - recon).abs();
                             if e > err_max {

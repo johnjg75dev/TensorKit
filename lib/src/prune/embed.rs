@@ -155,11 +155,9 @@ pub fn apply_embed_prune<M: Model + ?Sized>(
 
     let embed_f32s = read_as_f32s(model, embed_tensor)?;
     let embed_vocab = embed_tensor.shape.first().copied().unwrap_or(0) as usize;
-    let hidden_dim = if embed_vocab > 0 {
-        embed_f32s.len() / embed_vocab
-    } else {
-        return Err(Error::EmbedPrune("embedding vocab size is 0".into()));
-    };
+    let hidden_dim = embed_f32s.len()
+        .checked_div(embed_vocab)
+        .ok_or_else(|| Error::EmbedPrune("embedding vocab size is 0".into()))?;
 
     // Extract kept rows from the embedding.
     let new_embed_bytes = extract_rows(&embed_f32s, embed_vocab, hidden_dim, &plan.keep_rows);

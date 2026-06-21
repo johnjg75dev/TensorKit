@@ -42,7 +42,7 @@ fn pack_qs(qs: &mut [u8; 128], j: usize, n: u8) {
 }
 
 pub fn quantize(src: &[f32]) -> Vec<u8> {
-    debug_assert!(src.len() % QK_K == 0);
+    debug_assert!(src.len().is_multiple_of(QK_K));
     let mut out = Vec::with_capacity(src.len() / QK_K * BLOCK_BYTES);
     for blk in src.chunks_exact(QK_K) {
         let (block_max, block_min) = blk
@@ -107,7 +107,7 @@ pub fn quantize(src: &[f32]) -> Vec<u8> {
                             if d_sc == 0.0 {
                                 continue;
                             }
-                            let q = ((v + m_sc) / d_sc).round().clamp(0.0, 31.0) as f32;
+                            let q = ((v + m_sc) / d_sc).round().clamp(0.0, 31.0);
                             let recon = d_sc * q - m_sc;
                             let e = (v - recon).abs();
                             if e > err_max {

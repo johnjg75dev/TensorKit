@@ -19,7 +19,7 @@ pub fn render_html_report(
     template_path: Option<&Path>,
 ) -> Result<String> {
     let template = if let Some(path) = template_path {
-        std::fs::read_to_string(path).map_err(|e| crate::error::Error::Io(e))?
+        std::fs::read_to_string(path).map_err(crate::error::Error::Io)?
     } else {
         DEFAULT_TEMPLATE.to_string()
     };
@@ -154,7 +154,7 @@ pub fn render_html_report(
     let mut spectra_canvases = String::new();
     let mut spec_idx = 0usize;
     for b in &analysis.blocks {
-        for (_name, spec) in &b.spectra {
+        for spec in b.spectra.values() {
             if spec.is_empty() {
                 continue;
             }

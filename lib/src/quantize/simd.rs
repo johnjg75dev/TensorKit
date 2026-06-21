@@ -56,7 +56,7 @@ unsafe fn max_abs_32(src: &[f32]) -> f32 {
 
 #[target_feature(enable = "avx2,fma")]
 unsafe fn quantize_q4_0_avx2(src: &[f32]) -> Vec<u8> {
-    debug_assert!(src.len() % 32 == 0);
+    debug_assert!(src.len().is_multiple_of(32));
     let n_blocks = src.len() / 32;
     let mut out = Vec::with_capacity(n_blocks * 18);
 
@@ -66,7 +66,7 @@ unsafe fn quantize_q4_0_avx2(src: &[f32]) -> Vec<u8> {
         out.extend_from_slice(&f32_to_f16_bits(d).to_le_bytes());
 
         if d == 0.0 {
-            out.extend(std::iter::repeat(0u8).take(16));
+            out.extend(std::iter::repeat_n(0u8, 16));
             continue;
         }
 
@@ -119,7 +119,7 @@ unsafe fn quantize_q4_0_avx2(src: &[f32]) -> Vec<u8> {
 
 #[target_feature(enable = "avx2")]
 unsafe fn quantize_q8_0_avx2(src: &[f32]) -> Vec<u8> {
-    debug_assert!(src.len() % 32 == 0);
+    debug_assert!(src.len().is_multiple_of(32));
     let n_blocks = src.len() / 32;
     let mut out = Vec::with_capacity(n_blocks * 34);
 
@@ -129,7 +129,7 @@ unsafe fn quantize_q8_0_avx2(src: &[f32]) -> Vec<u8> {
         out.extend_from_slice(&f32_to_f16_bits(d).to_le_bytes());
 
         if d == 0.0 {
-            out.extend(std::iter::repeat(0u8).take(32));
+            out.extend(std::iter::repeat_n(0u8, 32));
             continue;
         }
 

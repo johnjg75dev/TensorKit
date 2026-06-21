@@ -18,6 +18,12 @@ pub struct WriterTensor {
     pub bytes: Vec<u8>,
 }
 
+impl Default for SafetensorsWriter {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl SafetensorsWriter {
     pub fn new() -> Self {
         Self {
@@ -58,14 +64,13 @@ impl SafetensorsWriter {
         let mut offset: u64 = 0;
         let mut header_obj: BTreeMap<String, serde_json::Value> = BTreeMap::new();
 
-        if let Some(ref m) = self.metadata {
-            if !m.is_empty() {
+        if let Some(ref m) = self.metadata
+            && !m.is_empty() {
                 header_obj.insert(
                     "__metadata__".to_string(),
                     serde_json::to_value(m).unwrap_or_default(),
                 );
             }
-        }
 
         for t in &self.tensors {
             let start = offset;

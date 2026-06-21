@@ -30,7 +30,7 @@ use tensorkit::prune::{
 };
 use tensorkit::quantize::apply::quantize_gguf as quantize_gguf_apply;
 use tensorkit::svd::{
-    AdjacentSelection, LayerSelection, OutputDtype, RankSpecWithClamps, SvdConfig, TensorSelection,
+    AdjacentSelection, LayerSelection, OutputDtype, RankSpecWithClamps, SvdBackend, SvdConfig, TensorSelection,
     apply_to_gguf as svd_apply_gguf, apply_to_onnx as svd_apply_onnx, apply_to_safetensors as svd_apply_st,
     build_plan as build_svd_plan,
 };
@@ -125,6 +125,10 @@ enum Commands {
         /// Output dtype (f32, f16, bf16, auto)
         #[arg(long, default_value = "f16")]
         dtype: String,
+
+        /// SVD backend: "jacobi" (pure-Rust parallel) or "faer" (LAPACK-quality)
+        #[arg(long, default_value = "faer")]
+        backend: String,
 
         /// Minimum dimension to qualify for SVD
         #[arg(long, default_value_t = 16)]
@@ -252,6 +256,20 @@ enum Commands {
         #[arg(default_value = "all")]
         category: String,
     },
+
+    /// Run inference and view activations at each layer
+    Infer {
+        /// Path to the GGUF model file
+        model: PathBuf,
+
+        /// Input token IDs (comma-separated, e.g., "1,2,3,4")
+        #[arg(long, default_value = "1")]
+        tokens: String,
+
+        /// Output as JSON
+        #[arg(long)]
+        json: bool,
+    },
 }
 
 fn main() -> ExitCode {
@@ -268,19 +286,19 @@ fn main() -> ExitCode {
 fn run(cli: Cli) -> Result<(), Error> {
     match cli.command {
         Commands::Analyze { model, sample, json, report, template, dry_run } => {
-            run_analyze(&model, sample, json, report.as_ref().map(|v| &**v), template.as_ref().map(|v| &**v), dry_run)
+            run_analyze(&model, sample, json, report.as_deref(), template.as_deref(), dry_run)
         }
         Commands::Prune { model, selection, out, verify, yes } => {
             run_prune(&model, &selection, &out, verify, yes)
         }
-        Commands::Svd { model, layers, tensors, rank, dtype, min_dim, adjacent, out, yes, no_randomized } => {
-            run_svd(&model, &layers, &tensors, &rank, &dtype, min_dim, adjacent.as_deref(), &out, yes, no_randomized)
+        Commands::Svd { model, layers, tensors, rank, dtype, backend, min_dim, adjacent, out, yes, no_randomized } => {
+            run_svd(&model, &layers, &tensors, &rank, &dtype, &backend, min_dim, adjacent.as_deref(), &out, yes, no_randomized)
         }
         Commands::Quant { model, target, out, blocks, yes } => {
             run_quant(&model, &target, &out, &blocks, yes)
         }
         Commands::Merge { model_a, model_b, mode, weights, config, out, yes } => {
-            run_merge(&model_a, model_b.as_ref().map(|v| &**v), &mode, weights.as_deref(), config.as_ref().map(|v| &**v), &out, yes)
+            run_merge(&model_a, model_b.as_deref(), &mode, weights.as_deref(), config.as_deref(), &out, yes)
         }
         Commands::Moe { model, strategy, out, expert_pattern, yes } => {
             run_moe(&model, &strategy, &out, expert_pattern.as_deref(), yes)
@@ -292,10 +310,13 @@ fn run(cli: Cli) -> Result<(), Error> {
             pipeline::run_interactive()
         }
         Commands::Bench { op, model, iterations } => {
-            run_bench(&op, model.as_ref().map(|v| &**v), iterations)
+            run_bench(&op, model.as_deref(), iterations)
         }
         Commands::Test { category } => {
             run_test(&category)
+        }
+        Commands::Infer { model, tokens, json } => {
+            run_infer(&model, &tokens, json)
         }
     }
 }
@@ -423,9 +444,10 @@ pub(crate) fn run_prune(model: &Path, selection_str: &str, out: &Path, verify: b
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn run_svd(
     model: &Path, layers_str: &str, tensors_str: &str, rank_str: &str, dtype_str: &str,
-    min_dim: usize, adjacent_str: Option<&str>, out: &Path, yes: bool, no_randomized: bool
+    backend_str: &str, min_dim: usize, adjacent_str: Option<&str>, out: &Path, yes: bool, no_randomized: bool
 ) -> Result<(), Error> {
     let format = ModelFormat::from_path(model);
     eprintln!("[open] {} (format: {})", model.display(), format.as_str());
@@ -438,6 +460,8 @@ pub(crate) fn run_svd(
         .map_err(|e| Error::Gguf(format!("--rank: {e}")))?;
     let dtype = OutputDtype::parse(dtype_str)
         .map_err(|e| Error::Gguf(format!("--dtype: {e}")))?;
+    let backend = SvdBackend::parse(backend_str)
+        .map_err(|e| Error::Gguf(format!("--backend: {e}")))?;
     
     let adjacent = if let Some(s) = adjacent_str {
         Some(AdjacentSelection::parse(s)
@@ -446,8 +470,10 @@ pub(crate) fn run_svd(
         None
     };
 
+    eprintln!("[svd] backend: {backend}");
+
     let cfg = SvdConfig {
-        layers, tensors, rank, dtype, min_dim,
+        layers, tensors, rank, dtype, backend, min_dim,
         randomized: !no_randomized, randomized_oversample: 8, randomized_power_iters: 2, randomized_min_elems: 262_144,
         suffix_a: ".svd_a".into(), suffix_b: ".svd_b".into(),
         per_layer: Default::default(), per_tensor: Vec::new(), adjacent: adjacent.flatten(),
@@ -1013,4 +1039,18 @@ fn write_html_report(analysis: &tensorkit::Analysis, path: &Path, template_path:
         .map_err(|e| Error::Gguf(format!("report generation failed: {e}")))?;
     std::fs::write(path, html).map_err(Error::Io)?;
     Ok(())
+}
+
+fn run_infer(model: &Path, tokens_str: &str, json: bool) -> Result<(), Error> {
+    let token_ids: Vec<u32> = tokens_str
+        .split(',')
+        .map(|s| s.trim().parse::<u32>())
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|e| Error::Infer(format!("invalid token ID: {e}")))?;
+
+    if token_ids.is_empty() {
+        return Err(Error::Infer("no token IDs provided".into()));
+    }
+
+    tensorkit::infer::activations::run_inference(model, &token_ids, json)
 }

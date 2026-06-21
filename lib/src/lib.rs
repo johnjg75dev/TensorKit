@@ -22,7 +22,9 @@ pub mod analysis;
 #[cfg(feature = "calibrate")]
 pub mod calibrate;
 pub mod error;
+pub mod ffi;
 pub mod formats;
+pub mod infer;
 pub mod merge;
 pub mod model;
 pub mod prune;
@@ -48,15 +50,20 @@ pub use merge::{
 };
 pub use model::{BlockRef, MetadataValue, Model, ModelFormat, Tensor, TensorDtype};
 pub use prune::{
-    apply_embed_prune, build_plan, parse_selection, plan_embed_prune, EmbedPrunePlan,
-    PrunePlan, PruneReport, Selection, TokenSelection,
+    apply_embed_prune, build_plan, gguf_value_type, is_block_count_key, is_tensor_count_key,
+    looks_like_per_layer_array, parse_block_key, parse_selection, plan_embed_prune, rename_block,
+    rename_metadata_block_key, shrink_array, EmbedPrunePlan, PrunePlan, PruneReport, Selection,
+    TokenSelection,
 };
-pub use quantize::{is_quantizable, quantize};
+pub use quantize::{dispatch_quantize, is_quantizable, quantize};
+pub use quantize::apply::{block_index_from_name, max_abs_diff};
 pub use report::render_html_report;
 pub use svd::{
     apply_to_gguf as svd_apply_to_gguf, apply_to_safetensors as svd_apply_to_safetensors,
-    build_plan as build_svd_plan, LayerSelection, OutputDtype, RankClamps, RankSpec,
-    RankSpecWithClamps, SvdApplied, SvdConfig, SvdPlan, SvdReport, SvdTarget, TensorSelection,
+    build_plan as build_svd_plan, evd_symmetric, jacobi_2x2, orthonormalize_cols, pack_lowrank,
+    rank_for_energy, reconstruct, slice_cols, slice_rows, svd_faer, svd_jacobi, svd_randomized,
+    transpose, LayerSelection, OutputDtype, RankClamps, RankSpec, RankSpecWithClamps, SvdApplied,
+    SvdBackend, SvdConfig, SvdPlan, SvdReport, SvdTarget, TensorSelection, AlignedVec, Mat, Svd,
 };
 
 pub fn git_version() -> &'static str {

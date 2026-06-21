@@ -441,6 +441,36 @@ pub enum OutputDtype {
     Ggml(crate::formats::gguf::types::GgmlType),
 }
 
+/// SVD computation backend.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SvdBackend {
+    /// Pure-Rust parallel Jacobi (no external dependencies, good for small matrices).
+    Jacobi,
+    /// LAPACK-quality divide-and-conquer via `faer` (fast for large matrices).
+    Faer,
+}
+
+impl SvdBackend {
+    pub fn parse(s: &str) -> Result<Self> {
+        match s.to_ascii_lowercase().as_str() {
+            "jacobi" | "parallel" | "rust" => Ok(Self::Jacobi),
+            "faer" | "lapack" | "fast" => Ok(Self::Faer),
+            other => Err(Error::InvalidSvdConfig(format!(
+                "unknown SVD backend '{other}' (supported: jacobi, faer)"
+            ))),
+        }
+    }
+}
+
+impl std::fmt::Display for SvdBackend {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Jacobi => write!(f, "jacobi"),
+            Self::Faer => write!(f, "faer"),
+        }
+    }
+}
+
 impl OutputDtype {
     pub fn parse(s: &str) -> Result<Self> {
         let s = s.trim();
@@ -500,6 +530,8 @@ pub struct SvdConfig {
     pub tensors: TensorSelection,
     pub rank: RankSpecWithClamps,
     pub dtype: OutputDtype,
+    /// SVD computation backend (Jacobi or Faer).
+    pub backend: SvdBackend,
     /// Minimum size of a tensor (min(m, n)) to be eligible. Smaller tensors are skipped.
     pub min_dim: usize,
     /// Random-seeded randomized SVD for large matrices.
@@ -535,6 +567,7 @@ impl Default for SvdConfig {
                 clamps: RankClamps { min: 4, max: None },
             },
             dtype: OutputDtype::F16,
+            backend: SvdBackend::Faer,
             min_dim: 16,
             randomized: true,
             randomized_oversample: 8,

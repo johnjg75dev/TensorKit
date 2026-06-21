@@ -60,18 +60,19 @@ static PER_LAYER_ARRAY_PATTERNS: &[&str] = &[
     ".embedding_length",
 ];
 
+/// Check if a metadata key is a block-count key.
 #[inline]
-fn is_block_count_key(key: &str) -> bool {
+pub fn is_block_count_key(key: &str) -> bool {
     key == "block_count" || key.ends_with(".block_count")
 }
 
 #[inline]
-fn is_tensor_count_key(key: &str) -> bool {
+pub fn is_tensor_count_key(key: &str) -> bool {
     key == "tensor_count" || key.ends_with(".tensor_count")
 }
 
 /// Check if a metadata key looks like a per-layer array based on known patterns.
-fn looks_like_per_layer_array(key: &str, arch: &str) -> bool {
+pub fn looks_like_per_layer_array(key: &str, arch: &str) -> bool {
     let rest = key.strip_prefix(&format!("{arch}.")).unwrap_or(key);
     PER_LAYER_ARRAY_PATTERNS
         .iter()
@@ -79,7 +80,7 @@ fn looks_like_per_layer_array(key: &str, arch: &str) -> bool {
 }
 
 /// Check if a metadata key contains a block index reference (`blk.{N}.`).
-fn parse_block_key(key: &str) -> Option<(String, i32, String)> {
+pub fn parse_block_key(key: &str) -> Option<(String, i32, String)> {
     // Match: <prefix>blk.<N>.<suffix>
     let blk_pos = key.find("blk.")?;
     let prefix = &key[..blk_pos];
@@ -92,7 +93,7 @@ fn parse_block_key(key: &str) -> Option<(String, i32, String)> {
 }
 
 /// Remove array elements at `dropped` indices (which must be sorted ascending).
-fn shrink_array(arr: &ArrayValue, dropped: &[i32]) -> ArrayValue {
+pub fn shrink_array(arr: &ArrayValue, dropped: &[i32]) -> ArrayValue {
     let drop_set: HashSet<i32> = dropped.iter().cloned().collect();
     let mut new_elements = Vec::with_capacity(arr.elements.len().saturating_sub(dropped.len()));
     for (i, elem) in arr.elements.iter().enumerate() {
@@ -106,7 +107,7 @@ fn shrink_array(arr: &ArrayValue, dropped: &[i32]) -> ArrayValue {
     }
 }
 
-fn gguf_value_type(v: &MetaValue) -> u32 {
+pub fn gguf_value_type(v: &MetaValue) -> u32 {
     match v {
         MetaValue::U8(_) => 0,
         MetaValue::I8(_) => 1,
@@ -309,16 +310,14 @@ pub fn apply_to_safetensors(
     );
 
     // Update block_count and tensor_count in metadata if present.
-    if let Some(_) = writer.metadata {
-        if let Some(m) = writer.metadata.as_mut() {
-            if let Some(arch) = st.architecture() {
+    if writer.metadata.is_some()
+        && let Some(m) = writer.metadata.as_mut()
+            && let Some(arch) = st.architecture() {
                 let bc_key = format!("{arch}.block_count");
                 m.insert(bc_key, serde_json::json!(plan.new_block_count));
                 let tc_key = format!("{arch}.tensor_count");
                 m.insert(tc_key, serde_json::json!(kept));
             }
-        }
-    }
 
     let mut kept_count = 0usize;
     let mut dropped_count = 0usize;
@@ -360,11 +359,10 @@ pub fn apply_to_onnx(onnx: &OnnxFile, plan: &PrunePlan, dst: &Path) -> Result<Pr
     if let Some(name) = onnx.name() {
         writer = writer.producer(name, "");
     }
-    if let Some(graph_name) = onnx.proto.graph.as_ref().map(|g| g.name.clone()) {
-        if !graph_name.is_empty() {
+    if let Some(graph_name) = onnx.proto.graph.as_ref().map(|g| g.name.clone())
+        && !graph_name.is_empty() {
             writer = writer.graph_name(&graph_name);
         }
-    }
     // Carry forward ONNX metadata properties.
     for prop in &onnx.proto.metadata_props {
         writer.add_metadata(&prop.key, &prop.value);
@@ -470,7 +468,7 @@ pub fn rename_block(name: &str, remap: &std::collections::HashMap<i32, i32>) -> 
 }
 
 /// Re-index a metadata key containing `blk.{N}.` to use the new block index.
-fn rename_metadata_block_key(key: &str, old_idx: i32, new_idx: i32) -> String {
+pub fn rename_metadata_block_key(key: &str, old_idx: i32, new_idx: i32) -> String {
     let blk_tag = format!("blk.{old_idx}.");
     if let Some(pos) = key.find(&blk_tag) {
         let prefix = &key[..pos];

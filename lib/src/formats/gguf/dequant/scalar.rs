@@ -281,7 +281,7 @@ pub fn dequant_q5_k(bytes: &[u8]) -> Vec<f32> {
             let (sc1, mn1) = get_scale_min_k4(&sc, sub);
             let d_sc = d * sc1 as f32;
             let m_sc = dmin * mn1 as f32;
-            let h = ((qh[j / 8] >> (j % 8)) & 1) as u8;
+            let h = (qh[j / 8] >> (j % 8)) & 1;
             let q = if j < QK_K / 2 {
                 (qs[j] & 0x0F) | (h << 4)
             } else {
@@ -869,14 +869,14 @@ pub fn dequant_iq1_m(bytes: &[u8]) -> Vec<f32> {
             | (sc_u16[3] & 0xf000);
         let d = f16_to_f32(d_bits);
         for ib in 0..8 {
-            let dl1 = d * (2.0 * ((sc_u16[ib / 2] >> (6 * (ib % 2) + 0)) & 0x7) as f32 + 1.0);
+            let dl1 = d * (2.0 * ((sc_u16[ib / 2] >> (6 * (ib % 2))) & 0x7) as f32 + 1.0);
             let dl2 = d * (2.0 * ((sc_u16[ib / 2] >> (6 * (ib % 2) + 3)) & 0x7) as f32 + 1.0);
-            let idx0 = qs[ib * 4 + 0] as u16 | ((qh[ib * 2 + 0] as u16) << 8) & 0x700;
-            let idx1 = qs[ib * 4 + 1] as u16 | ((qh[ib * 2 + 0] as u16) << 4) & 0x700;
+            let idx0 = qs[ib * 4] as u16 | ((qh[ib * 2] as u16) << 8) & 0x700;
+            let idx1 = qs[ib * 4 + 1] as u16 | ((qh[ib * 2] as u16) << 4) & 0x700;
             let idx2 = qs[ib * 4 + 2] as u16 | ((qh[ib * 2 + 1] as u16) << 8) & 0x700;
             let idx3 = qs[ib * 4 + 3] as u16 | ((qh[ib * 2 + 1] as u16) << 4) & 0x700;
-            let delta0 = if qh[ib * 2 + 0] & 0x08 != 0 { -IQ1S_DELTA } else { IQ1S_DELTA };
-            let delta1 = if qh[ib * 2 + 0] & 0x80 != 0 { -IQ1S_DELTA } else { IQ1S_DELTA };
+            let delta0 = if qh[ib * 2] & 0x08 != 0 { -IQ1S_DELTA } else { IQ1S_DELTA };
+            let delta1 = if qh[ib * 2] & 0x80 != 0 { -IQ1S_DELTA } else { IQ1S_DELTA };
             let delta2 = if qh[ib * 2 + 1] & 0x08 != 0 { -IQ1S_DELTA } else { IQ1S_DELTA };
             let delta3 = if qh[ib * 2 + 1] & 0x80 != 0 { -IQ1S_DELTA } else { IQ1S_DELTA };
             for l in 0..2 {

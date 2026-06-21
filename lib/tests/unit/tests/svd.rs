@@ -376,6 +376,7 @@ fn apply_to_gguf_compression_produces_valid_output() {
     cfg.min_dim = 4;
     // Force jacobi (disable randomized)
     cfg.randomized = false;
+    cfg.backend = crate::svd::SvdBackend::Jacobi;
     let plan = build_plan(&gg, &cfg).unwrap();
     assert_eq!(plan.targets.len(), 1);
 

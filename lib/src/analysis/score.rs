@@ -68,11 +68,10 @@ pub fn classify(name: &str) -> (BlockRole, i32, String) {
     }
     if let Some(rest) = name.strip_prefix("blk.") {
         let mut parts = rest.split('.');
-        if let Some(idx_str) = parts.next() {
-            if let Ok(idx) = idx_str.parse::<i32>() {
+        if let Some(idx_str) = parts.next()
+            && let Ok(idx) = idx_str.parse::<i32>() {
                 return (BlockRole::Block, idx, format!("blk.{idx}"));
             }
-        }
     }
     (BlockRole::Other, -1, "other".into())
 }
@@ -84,7 +83,7 @@ pub fn score_tensor(name: &str, st: &TensorStats) -> f64 {
     }
     let s_sparse = st.sparsity_abs.clamp(0.0, 1.0);
     let s_no_outlier = (1.0 - st.outlier_ratio).clamp(0.0, 1.0);
-    let mag = (st.abs_mean.max(1e-9) as f64).log10();
+    let mag = st.abs_mean.max(1e-9).log10();
     let mag_norm = ((mag + 4.0) / 4.0).clamp(0.0, 1.0);
     let s_small = 1.0 - mag_norm;
     let s_low_entropy = (1.0 - st.entropy_bits / 12.0).clamp(0.0, 1.0);
@@ -172,7 +171,7 @@ pub fn apply_neighbor_similarity(
     }
 }
 
-fn cosine(a: &[f32], b: &[f32]) -> f64 {
+pub fn cosine(a: &[f32], b: &[f32]) -> f64 {
     let n = a.len().min(b.len());
     if n == 0 {
         return 0.0;

@@ -28,6 +28,12 @@ pub struct Analyzer {
     parallel: bool,
 }
 
+impl Default for Analyzer {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl Analyzer {
     pub fn new() -> Self {
         Self {

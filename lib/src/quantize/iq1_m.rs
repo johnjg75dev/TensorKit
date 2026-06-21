@@ -37,7 +37,7 @@ fn find_best_grid(target: &[f32; 8], expanded: &[[i8; 8]; 2048]) -> usize {
 }
 
 pub fn quantize(src: &[f32]) -> Vec<u8> {
-    debug_assert!(src.len() % QK_K == 0);
+    debug_assert!(src.len().is_multiple_of(QK_K));
     let mut out = Vec::with_capacity(src.len() / QK_K * BLOCK_BYTES);
     let expanded = expand_iq1s_grid();
 
@@ -124,9 +124,9 @@ pub fn quantize(src: &[f32]) -> Vec<u8> {
         }
 
         let d_bits = f32_to_f16_bits(d);
-        scales[0] |= ((d_bits & 0x000f) as u16) << 12;
-        scales[1] |= ((d_bits & 0x00f0) as u16) << 4;
-        scales[2] |= ((d_bits & 0x0f00) as u16) >> 4;
+        scales[0] |= (d_bits & 0x000f) << 12;
+        scales[1] |= (d_bits & 0x00f0) << 4;
+        scales[2] |= (d_bits & 0x0f00) >> 4;
         scales[3] |= d_bits & 0xf000;
 
         out.extend_from_slice(&qs);

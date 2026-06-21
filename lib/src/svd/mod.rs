@@ -27,12 +27,19 @@
 
 pub mod apply;
 pub mod config;
+pub mod faer_backend;
 pub mod linalg;
 pub mod plan;
 
 pub use apply::{apply_to_gguf, apply_to_onnx, apply_to_safetensors, SvdApplied, SvdReport};
 pub use config::{
     AdjacentEntry, AdjacentRole, AdjacentSelection, LayerSelection, OutputDtype, RankClamps,
-    RankSpec, RankSpecWithClamps, SvdConfig, TensorSelection, ATTN_SUFFIXES, FFN_SUFFIXES,
+    RankSpec, RankSpecWithClamps, SvdBackend, SvdConfig, TensorSelection, ATTN_SUFFIXES, FFN_SUFFIXES,
 };
 pub use plan::{build_plan, SkippedTensor, SvdPlan, SvdTarget};
+
+pub use linalg::{
+    evd_symmetric, jacobi_2x2, orthonormalize_cols, pack_lowrank, rank_for_energy, reconstruct,
+    slice_cols, slice_rows, svd_jacobi, svd_randomized, transpose, AlignedVec, Mat, Svd,
+};
+pub use faer_backend::svd_faer;

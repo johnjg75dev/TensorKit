@@ -29,7 +29,7 @@ fn grid_entries() -> Vec<[i8; 4]> {
 }
 
 pub fn quantize(src: &[f32]) -> Vec<u8> {
-    debug_assert!(src.len() % BLOCK_LEN == 0);
+    debug_assert!(src.len().is_multiple_of(BLOCK_LEN));
     let mut out = Vec::with_capacity(src.len() / BLOCK_LEN * BLOCK_BYTES);
     let grid = grid_entries();
 
@@ -61,7 +61,7 @@ pub fn quantize(src: &[f32]) -> Vec<u8> {
                 0u32
             } else {
                 let s = ((group_max[g] / (d.abs() * MAX_GRID_VAL) - 0.5) / 0.5).ceil() as i32;
-                s.max(0).min(15) as u32
+                s.clamp(0, 15) as u32
             };
             let db = d * (0.5 + scale as f32 * 0.5);
 

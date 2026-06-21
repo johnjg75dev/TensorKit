@@ -365,7 +365,7 @@ impl Accum {
 }
 
 /// Compute skewness and (excess) kurtosis from Welford's running sums.
-fn moments_from_welford(m2: f64, m3: f64, m4: f64, n: u64) -> (f64, f64) {
+pub fn moments_from_welford(m2: f64, m3: f64, m4: f64, n: u64) -> (f64, f64) {
     if n < 2 || m2 <= 0.0 {
         return (0.0, 0.0);
     }
@@ -383,7 +383,7 @@ fn moments_from_welford(m2: f64, m3: f64, m4: f64, n: u64) -> (f64, f64) {
 
 /// Compute skewness and (excess) kurtosis directly from a (small) sample of
 /// values. Population moments (divided by n) are used for both.
-fn moments_from_reservoir(values: &[f32]) -> (f64, f64) {
+pub fn moments_from_reservoir(values: &[f32]) -> (f64, f64) {
     if values.len() < 2 {
         return (0.0, 0.0);
     }
@@ -413,7 +413,7 @@ fn moments_from_reservoir(values: &[f32]) -> (f64, f64) {
 }
 
 #[inline]
-fn pct(sorted: &[f32], q: f64) -> f32 {
+pub fn pct(sorted: &[f32], q: f64) -> f32 {
     if sorted.is_empty() {
         return 0.0;
     }
@@ -422,7 +422,7 @@ fn pct(sorted: &[f32], q: f64) -> f32 {
 }
 
 #[inline]
-fn bucket_key(x: f32) -> usize {
+pub fn bucket_key(x: f32) -> usize {
     if x == 0.0 {
         return 0;
     }

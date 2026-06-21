@@ -11,7 +11,7 @@ const BLOCK: usize = 32;
 const BLOCK_BYTES: usize = 36;
 
 pub fn quantize(src: &[f32]) -> Vec<u8> {
-    debug_assert!(src.len() % BLOCK == 0);
+    debug_assert!(src.len().is_multiple_of(BLOCK));
     let mut out = Vec::with_capacity(src.len() / BLOCK * BLOCK_BYTES);
     for blk in src.chunks_exact(BLOCK) {
         let amax = blk.iter().fold(0.0f32, |m, &v| m.max(v.abs()));

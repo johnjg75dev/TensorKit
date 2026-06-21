@@ -139,11 +139,7 @@ impl Model for SafetensorsFile {
                     Some(MetadataValue::U64(v))
                 } else if let Some(v) = n.as_i64() {
                     Some(MetadataValue::I64(v))
-                } else if let Some(v) = n.as_f64() {
-                    Some(MetadataValue::F64(v))
-                } else {
-                    None
-                }
+                } else { n.as_f64().map(MetadataValue::F64) }
             }
             serde_json::Value::Bool(b) => Some(MetadataValue::Bool(*b)),
             _ => None,

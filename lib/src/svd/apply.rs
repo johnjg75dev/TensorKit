@@ -44,7 +44,8 @@ use crate::formats::onnx::{OnnxFile, OnnxWriter};
 use crate::formats::safetensors::reader::SafetensorsFile;
 use crate::formats::safetensors::writer::SafetensorsWriter;
 use crate::model::{Model, TensorDtype};
-use crate::svd::config::OutputDtype;
+use crate::svd::config::{OutputDtype, SvdBackend};
+use crate::svd::faer_backend::svd_faer;
 use crate::svd::linalg::{pack_lowrank, slice_cols, slice_rows, svd_jacobi, svd_randomized, Mat};
 use crate::svd::plan::{SvdPlan, SvdTarget};
 use std::io::Write;
@@ -376,11 +377,10 @@ pub fn apply_to_onnx(onnx: &OnnxFile, plan: &SvdPlan, dst: &Path) -> Result<SvdR
     if let Some(name) = onnx.name() {
         writer = writer.producer(name, "");
     }
-    if let Some(graph_name) = onnx.proto.graph.as_ref().map(|g| g.name.clone()) {
-        if !graph_name.is_empty() {
+    if let Some(graph_name) = onnx.proto.graph.as_ref().map(|g| g.name.clone())
+        && !graph_name.is_empty() {
             writer = writer.graph_name(&graph_name);
         }
-    }
     for prop in &onnx.proto.metadata_props {
         writer.add_metadata(&prop.key, &prop.value);
     }
@@ -547,6 +547,8 @@ fn run_svd(
                     cfg.randomized_power_iters,
                     hash_seed(name, target),
                 )?
+            } else if cfg.backend == SvdBackend::Faer {
+                svd_faer(a_mat)?
             } else {
                 svd_jacobi(a_mat, 20, 1e-6)?
             };
@@ -569,6 +571,8 @@ fn run_svd(
                     cfg.randomized_power_iters,
                     hash_seed(name, target),
                 )?
+            } else if cfg.backend == SvdBackend::Faer {
+                svd_faer(a_mat)?
             } else {
                 svd_jacobi(a_mat, 20, 1e-6)?
             };
