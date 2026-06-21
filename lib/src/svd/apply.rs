@@ -548,7 +548,7 @@ fn run_svd(
                     hash_seed(name, target),
                 )?
             } else {
-                svd_jacobi(a_mat, 100, 1e-10)?
+                svd_jacobi(a_mat, 20, 1e-6)?
             };
             let k = cfg.resolve_rank(
                 name,
@@ -570,7 +570,7 @@ fn run_svd(
                     hash_seed(name, target),
                 )?
             } else {
-                svd_jacobi(a_mat, 100, 1e-10)?
+                svd_jacobi(a_mat, 20, 1e-6)?
             };
             Ok((svd, k))
         }

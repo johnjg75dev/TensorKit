@@ -191,8 +191,8 @@ unsafe fn dequant_q8_block_avx2(bytes: &[u8], max: usize, stride: usize, qs_off:
         let v_i8 = _mm256_loadu_si256(qs.as_ptr() as *const __m256i);
         let lo = _mm256_castsi256_si128(v_i8);
         let hi = _mm256_extracti128_si256(v_i8, 1);
-        let lo_hi = _mm_bsrli_si128(lo, 8);
-        let hi_hi = _mm_bsrli_si128(hi, 8);
+        let lo_hi = _mm_srli_si128(lo, 8);
+        let hi_hi = _mm_srli_si128(hi, 8);
 
         let f0 = _mm256_mul_ps(_mm256_cvtepi32_ps(_mm256_cvtepi8_epi32(lo)), d_v);
         let f1 = _mm256_mul_ps(_mm256_cvtepi32_ps(_mm256_cvtepi8_epi32(lo_hi)), d_v);

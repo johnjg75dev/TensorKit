@@ -101,14 +101,16 @@ unsafe fn quantize_q4_0_avx2(src: &[f32]) -> Vec<u8> {
         let hi = _mm256_extracti128_si256(p, 1);
         let i_lo = _mm_unpacklo_epi32(lo, hi);
         let i_hi = _mm_unpackhi_epi32(lo, hi);
-        let fixed = _mm256_setr_m128i(i_lo, i_hi);
+        let fixed = _mm256_set_m128i(i_hi, i_lo);
 
         // Store and nibble-pack in linear order.
         let mut buf = [0u8; 32];
         _mm256_storeu_si256(buf.as_mut_ptr() as *mut __m256i, fixed);
+        let base = out.as_mut_ptr().add(out.len());
         for j in 0..16 {
-            out.push(buf[2 * j] | (buf[2 * j + 1] << 4));
+            unsafe { *base.add(j) = buf[2 * j] | (buf[2 * j + 1] << 4); }
         }
+        out.set_len(out.len() + 16);
     }
     out
 }
@@ -159,7 +161,7 @@ unsafe fn quantize_q8_0_avx2(src: &[f32]) -> Vec<u8> {
         let hi = _mm256_extracti128_si256(p, 1);
         let i_lo = _mm_unpacklo_epi32(lo, hi);
         let i_hi = _mm_unpackhi_epi32(lo, hi);
-        let fixed = _mm256_setr_m128i(i_lo, i_hi);
+        let fixed = _mm256_set_m128i(i_hi, i_lo);
 
         let mut buf = [0u8; 32];
         _mm256_storeu_si256(buf.as_mut_ptr() as *mut __m256i, fixed);

@@ -615,7 +615,7 @@ fn execute_pipeline(cfg: &PipelineConfig) -> Result<(), crate::Error> {
                 let tensors = selection.as_deref().unwrap_or("mlp");
                 let rank_str = rank.as_deref().unwrap_or("0.5,min:4");
                 let dtype = "f16";
-                run_svd(m, layers, tensors, rank_str, dtype, 16, None, out, verify.unwrap_or(false))?;
+                run_svd(m, layers, tensors, rank_str, dtype, 16, None, out, verify.unwrap_or(false), false)?;
                 model = Some(out.clone());
             }
             PipelineStep::Merge { models, out, weights, slerp, verify: _verify } => {

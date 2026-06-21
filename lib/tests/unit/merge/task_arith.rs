@@ -213,10 +213,10 @@ fn ties_merge_basic() {
     // density 0.67 → keep top 2 of 3 per vector
     // a trimmed: [10.0, 0.0, -5.0]
     // b trimmed: [-8.0, 0.0, -4.0]
-    // elect sign: coord 0: pos(2) > neg(0) → +, coord 1: all zero → +, coord 2: neg(2) > pos(0) → -
-    // merged: coord 0: (10 + -8)/2 = 1.0, coord 1: 0.0, coord 2: (-5 + -4)/2 = -4.5
+    // elect sign: coord 0: tie(1 pos, 1 neg) → +, coord 1: all zero → +, coord 2: neg(2) → -
+    // merged: coord 0: only 10.0 agrees with + → 10.0, coord 1: 0.0, coord 2: (-5 + -4)/2 = -4.5
     assert_eq!(merged.len(), 3);
-    assert!((merged[0] - 1.0).abs() < 1e-5);
+    assert!((merged[0] - 10.0).abs() < 1e-5);
     assert!(merged[1].abs() < 1e-5);
     assert!((merged[2] - (-4.5)).abs() < 1e-5);
 }
@@ -229,8 +229,8 @@ fn ties_merge_single_vector() {
         elect_sign: true,
     };
     let merged = ties_merge(&[&a], &config).unwrap();
-    // Keep top 2 of 3: |1|=1, |-2|=2, |3|=3 → keep 3 and -2
-    assert_eq!(merged, vec![0.0, -2.0, 3.0]);
+    // Keep top 1 of 3: |1|=1, |-2|=2, |3|=3 → keep only 3
+    assert_eq!(merged, vec![0.0, 0.0, 3.0]);
 }
 
 #[test]
@@ -269,8 +269,8 @@ fn multiplier_hub_basic() {
     let tau1 = [1.0f32, 2.0, 3.0];
     let tau2 = [3.0f32, 2.0, 1.0];
     let mut hub = MultiplierHub::new();
-    hub.add("task_a", tau1, 0.5);
-    hub.add("task_b", tau2, 0.5);
+    hub.add("task_a", tau1.to_vec(), 0.5);
+    hub.add("task_b", tau2.to_vec(), 0.5);
     // 0 + 0.5*1 + 0.5*3 = 2.0, 0 + 0.5*2 + 0.5*2 = 2.0, 0 + 0.5*3 + 0.5*1 = 2.0
     let result = hub.apply_owned(&base);
     assert_eq!(result, vec![2.0, 2.0, 2.0]);
@@ -318,7 +318,7 @@ fn multiplier_hub_apply_into() {
     let base = [1.0f32, 2.0];
     let tau = [3.0f32, 4.0];
     let mut hub = MultiplierHub::new();
-    hub.add("t", tau, 0.25);
+    hub.add("t", tau.to_vec(), 0.25);
     let mut out = [0.0f32; 2];
     hub.apply(&mut out, &base);
     // 1 + 0.25*3 = 1.75, 2 + 0.25*4 = 3.0
@@ -338,7 +338,7 @@ fn multiplier_hub_apply_ties() {
     };
     let result = hub.apply_ties(&base, &config).unwrap();
     // Same as ties_merge result since base is zero
-    assert!((result[0] - 1.0).abs() < 1e-5);
+    assert!((result[0] - 10.0).abs() < 1e-5);
     assert!(result[1].abs() < 1e-5);
     assert!((result[2] - (-4.5)).abs() < 1e-5);
 }

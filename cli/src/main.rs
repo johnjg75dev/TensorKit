@@ -141,6 +141,10 @@ enum Commands {
         /// Skip confirmation prompt
         #[arg(long, short = 'y')]
         yes: bool,
+
+        /// Disable randomized SVD (forces Jacobi)
+        #[arg(long)]
+        no_randomized: bool,
     },
 
     /// Quantize model to a GGML type
@@ -269,8 +273,8 @@ fn run(cli: Cli) -> Result<(), Error> {
         Commands::Prune { model, selection, out, verify, yes } => {
             run_prune(&model, &selection, &out, verify, yes)
         }
-        Commands::Svd { model, layers, tensors, rank, dtype, min_dim, adjacent, out, yes } => {
-            run_svd(&model, &layers, &tensors, &rank, &dtype, min_dim, adjacent.as_deref(), &out, yes)
+        Commands::Svd { model, layers, tensors, rank, dtype, min_dim, adjacent, out, yes, no_randomized } => {
+            run_svd(&model, &layers, &tensors, &rank, &dtype, min_dim, adjacent.as_deref(), &out, yes, no_randomized)
         }
         Commands::Quant { model, target, out, blocks, yes } => {
             run_quant(&model, &target, &out, &blocks, yes)
@@ -421,7 +425,7 @@ pub(crate) fn run_prune(model: &Path, selection_str: &str, out: &Path, verify: b
 
 pub(crate) fn run_svd(
     model: &Path, layers_str: &str, tensors_str: &str, rank_str: &str, dtype_str: &str,
-    min_dim: usize, adjacent_str: Option<&str>, out: &Path, yes: bool
+    min_dim: usize, adjacent_str: Option<&str>, out: &Path, yes: bool, no_randomized: bool
 ) -> Result<(), Error> {
     let format = ModelFormat::from_path(model);
     eprintln!("[open] {} (format: {})", model.display(), format.as_str());
@@ -444,7 +448,7 @@ pub(crate) fn run_svd(
 
     let cfg = SvdConfig {
         layers, tensors, rank, dtype, min_dim,
-        randomized: false, randomized_oversample: 8, randomized_power_iters: 2, randomized_min_elems: 262_144,
+        randomized: !no_randomized, randomized_oversample: 8, randomized_power_iters: 2, randomized_min_elems: 262_144,
         suffix_a: ".svd_a".into(), suffix_b: ".svd_b".into(),
         per_layer: Default::default(), per_tensor: Vec::new(), adjacent: adjacent.flatten(),
     };

@@ -103,8 +103,11 @@ pub fn trim_task_vector(tau: &[f32], density: f64) -> Result<Vec<f32>> {
     }
 
     let dim = tau.len();
-    let keep_count = (density * dim as f64).ceil() as usize;
-    let keep_count = keep_count.min(dim);
+    if dim == 0 {
+        return Ok(Vec::new());
+    }
+    let keep_count = (density * dim as f64) as usize;
+    let keep_count = keep_count.min(dim).max(1);
 
     if keep_count == dim {
         return Ok(tau.to_vec());

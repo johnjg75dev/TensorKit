@@ -37,6 +37,15 @@ impl ModelFormat {
     }
 }
 
+/// Format-agnostic tensor descriptor.
+///
+/// # Alignment
+///
+/// Tensor data should be aligned to at least 32 bytes when possible to enable
+/// AVX2 SIMD operations (`_mm256_load_ps`, `_mm256_store_ps`). When using
+/// memory-mapped files (GGUF format), alignment depends on the file offset and
+/// the `general.alignment` metadata field (default 32 bytes). For in-memory
+/// tensors, use `AlignedVec` or ensure allocations meet the alignment requirement.
 #[derive(Debug, Clone)]
 pub struct Tensor {
     pub name: String,

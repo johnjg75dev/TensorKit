@@ -10,7 +10,7 @@ use crate::svd::config::{
     LayerSelection, OutputDtype, RankClamps, RankSpec, RankSpecWithClamps, SvdConfig,
     TensorSelection,
 };
-use crate::svd::linalg::{pack_lowrank, rank_for_energy, svd_jacobi, svd_randomized, Mat};
+use crate::svd::linalg::{evd_symmetric, pack_lowrank, rank_for_energy, reconstruct, svd_jacobi, svd_randomized, Mat};
 use crate::svd::plan::build_plan;
 use crate::Model;
 use std::path::PathBuf;
@@ -176,17 +176,9 @@ fn svd_jacobi_low_rank_reconstruction() {
     let a1_data: Vec<f32> = (0..a_pack.rows)
         .map(|r| a_pack.data[r * k_full_a])
         .collect();
-    let a1 = Mat {
-        rows: a_pack.rows,
-        cols: 1,
-        data: a1_data,
-    };
+    let a1 = Mat::from_vec(a_pack.rows, 1, a1_data);
     // b_pack is k_full x n; take the first k rows.
-    let b1 = Mat {
-        rows: 1,
-        cols: b_pack.cols,
-        data: b_pack.data[..b_pack.cols].to_vec(),
-    };
+    let b1 = Mat::from_vec(1, b_pack.cols, b_pack.data[..b_pack.cols].to_vec());
     let mut recon = Mat::new(m, n);
     Mat::matmul_into(&a1, &b1, &mut recon);
     let err = rel_err(&a_data, &recon.data);
@@ -360,6 +352,352 @@ fn apply_to_gguf_writes_expected_structure() {
     );
     let _ = std::fs::remove_file(&tmp);
     let _ = std::fs::remove_file(&out);
+}
+
+// ---- SVD apply parameter tests (jacobi sweeps=20, tol=1e-6) ---------------
+
+#[test]
+fn apply_to_gguf_compression_produces_valid_output() {
+    // Test that the new SVD parameters (20 sweeps, 1e-6 tol) produce valid output
+    let tmp = std::env::temp_dir().join(format!(
+        "tensorkit-svd-params-{}.gguf",
+        std::process::id()
+    ));
+    tiny_gguf_with_attn_q(&tmp);
+    let gg = crate::formats::gguf::GgufFile::open(&tmp).unwrap();
+    let mut cfg = SvdConfig::default();
+    cfg.layers = LayerSelection::AllMlp;
+    cfg.tensors = TensorSelection::Attn;
+    cfg.rank = RankSpecWithClamps {
+        spec: RankSpec::Absolute(2),
+        clamps: RankClamps { min: 1, max: None },
+    };
+    cfg.dtype = OutputDtype::F16;
+    cfg.min_dim = 4;
+    // Force jacobi (disable randomized)
+    cfg.randomized = false;
+    let plan = build_plan(&gg, &cfg).unwrap();
+    assert_eq!(plan.targets.len(), 1);
+
+    let out: PathBuf = tmp.with_extension("params.gguf");
+    let report = crate::svd::apply_to_gguf(&gg, &plan, &out).unwrap();
+    assert_eq!(report.applied.len(), 1);
+
+    // The approximation error should be small (within 5% relative)
+    assert!(
+        report.applied[0].approx_error < 0.05,
+        "approx_error too high with new params: {}",
+        report.applied[0].approx_error
+    );
+
+    // Verify the method is jacobi (since we disabled randomized)
+    assert_eq!(report.applied[0].method, "jacobi");
+
+    // Verify rank is correct
+    assert_eq!(report.applied[0].k, 2);
+
+    let _ = std::fs::remove_file(&tmp);
+    let _ = std::fs::remove_file(&out);
+}
+
+#[test]
+fn apply_to_gguf_compression_ratio_is_reasonable() {
+    // Test that compression ratio is reasonable for the new parameters
+    let tmp = std::env::temp_dir().join(format!(
+        "tensorkit-svd-ratio-{}.gguf",
+        std::process::id()
+    ));
+    tiny_gguf_with_attn_q(&tmp);
+    let gg = crate::formats::gguf::GgufFile::open(&tmp).unwrap();
+    let mut cfg = SvdConfig::default();
+    cfg.layers = LayerSelection::AllMlp;
+    cfg.tensors = TensorSelection::Attn;
+    cfg.rank = RankSpecWithClamps {
+        spec: RankSpec::Absolute(2),
+        clamps: RankClamps { min: 1, max: None },
+    };
+    cfg.dtype = OutputDtype::F32; // use F32 for clearer ratio calculation
+    cfg.min_dim = 4;
+    cfg.randomized = false;
+    let plan = build_plan(&gg, &cfg).unwrap();
+
+    let out: PathBuf = tmp.with_extension("ratio.gguf");
+    let report = crate::svd::apply_to_gguf(&gg, &plan, &out).unwrap();
+
+    // 8x4 F32 tensor = 128 bytes. With rank 2, svd_a is 8x2 (64B) + svd_b is 2x4 (32B) = 96B.
+    // Compression ratio = 1 - 96/128 = 0.25 (25% reduction)
+    assert!(
+        report.compression_ratio > 0.0,
+        "compression_ratio should be positive: {}",
+        report.compression_ratio
+    );
+    assert!(
+        report.compression_ratio < 1.0,
+        "compression_ratio should be less than 1: {}",
+        report.compression_ratio
+    );
+
+    let _ = std::fs::remove_file(&tmp);
+    let _ = std::fs::remove_file(&out);
+}
+
+#[test]
+fn apply_to_gguf_randomized_method_used_for_large_tensors() {
+    // Test that randomized method is chosen when tensor is large enough
+    let tmp = std::env::temp_dir().join(format!(
+        "tensorkit-svd-rand-{}.gguf",
+        std::process::id()
+    ));
+    tiny_gguf_with_attn_q(&tmp);
+    let gg = crate::formats::gguf::GgufFile::open(&tmp).unwrap();
+    let mut cfg = SvdConfig::default();
+    cfg.layers = LayerSelection::AllMlp;
+    cfg.tensors = TensorSelection::Attn;
+    cfg.rank = RankSpecWithClamps {
+        spec: RankSpec::Absolute(2),
+        clamps: RankClamps { min: 1, max: None },
+    };
+    cfg.dtype = OutputDtype::F16;
+    cfg.min_dim = 4;
+    // Enable randomized with low threshold
+    cfg.randomized = true;
+    cfg.randomized_min_elems = 10; // very low threshold, so even small tensors use randomized
+    let plan = build_plan(&gg, &cfg).unwrap();
+
+    let out: PathBuf = tmp.with_extension("rand.gguf");
+    let report = crate::svd::apply_to_gguf(&gg, &plan, &out).unwrap();
+
+    // 8x4 = 32 elements > 10, so should use randomized
+    assert_eq!(report.applied[0].method, "randomized");
+
+    let _ = std::fs::remove_file(&tmp);
+    let _ = std::fs::remove_file(&out);
+}
+
+// ---- Additional linalg edge case tests ------------------------------------
+
+#[test]
+fn svd_jacobi_1x1_matrix() {
+    let m = Mat::from_vec(1, 1, vec![5.0]);
+    let svd = svd_jacobi(&m, 100, 1e-10).unwrap();
+    assert_eq!(svd.s.len(), 1);
+    assert!((svd.s[0] - 5.0).abs() < 1e-5);
+}
+
+#[test]
+fn svd_jacobi_1x3_row_vector() {
+    let m = Mat::from_vec(1, 3, vec![1.0, 2.0, 3.0]);
+    let svd = svd_jacobi(&m, 100, 1e-10).unwrap();
+    // The Jacobi implementation returns n singular values (full Vt)
+    assert_eq!(svd.s.len(), 3);
+    // First singular value should be the Frobenius norm: sqrt(1+4+9) = sqrt(14)
+    let expected = (14.0f32).sqrt();
+    assert!((svd.s[0] - expected).abs() < 1e-3, "s[0] = {}", svd.s[0]);
+    // The rest should be near zero (rank-1 matrix)
+    assert!(svd.s[1].abs() < 0.01, "s[1] should be ~0: {}", svd.s[1]);
+    assert!(svd.s[2].abs() < 0.01, "s[2] should be ~0: {}", svd.s[2]);
+}
+
+#[test]
+fn svd_jacobi_3x1_column_vector() {
+    let m = Mat::from_vec(3, 1, vec![3.0, 4.0, 0.0]);
+    let svd = svd_jacobi(&m, 100, 1e-10).unwrap();
+    assert_eq!(svd.s.len(), 1);
+    // Singular value should be sqrt(9+16+0) = 5.0
+    assert!((svd.s[0] - 5.0).abs() < 1e-3, "s[0] = {}", svd.s[0]);
+}
+
+#[test]
+fn svd_jacobi_rank_deficient_matrix() {
+    // Rank-1 matrix: all rows are the same
+    let m = Mat::from_vec(4, 3, vec![
+        1.0, 2.0, 3.0,
+        1.0, 2.0, 3.0,
+        1.0, 2.0, 3.0,
+        1.0, 2.0, 3.0,
+    ]);
+    let svd = svd_jacobi(&m, 100, 1e-10).unwrap();
+    // Only 1 non-zero singular value
+    assert!(svd.s[0] > 1.0, "s[0] should be large: {}", svd.s[0]);
+    assert!(svd.s[1].abs() < 0.01, "s[1] should be ~0: {}", svd.s[1]);
+    assert!(svd.s[2].abs() < 0.01, "s[2] should be ~0: {}", svd.s[2]);
+}
+
+#[test]
+fn svd_jacobi_rectangular_tall_matrix() {
+    // Tall matrix: 6x3
+    let data: Vec<f32> = (0..18).map(|i| (i as f32 - 9.0) * 0.5).collect();
+    let m = Mat::from_vec(6, 3, data.clone());
+    let svd = svd_jacobi(&m, 100, 1e-10).unwrap();
+    assert_eq!(svd.u.rows, 6);
+    assert_eq!(svd.u.cols, 3);
+    assert_eq!(svd.s.len(), 3);
+    assert_eq!(svd.vt.rows, 3);
+    assert_eq!(svd.vt.cols, 3);
+
+    // Reconstruct and check error
+    let mut recon = Mat::new(6, 3);
+    for i in 0..6 {
+        for j in 0..3 {
+            let mut val = 0.0f64;
+            for p in 0..3 {
+                val += svd.u.get(i, p) as f64 * svd.s[p] as f64 * svd.vt.get(p, j) as f64;
+            }
+            recon.set(i, j, val as f32);
+        }
+    }
+    for i in 0..18 {
+        assert!(
+            (data[i] - recon.data[i]).abs() < 1e-3,
+            "tall recon error at {i}: {} vs {}",
+            data[i],
+            recon.data[i]
+        );
+    }
+}
+
+#[test]
+fn svd_jacobi_orthogonal_matrix() {
+    // A known orthogonal matrix (rotation)
+    let theta = std::f32::consts::FRAC_PI_4; // 45 degrees
+    let m = Mat::from_vec(2, 2, vec![
+        theta.cos(), -theta.sin(),
+        theta.sin(),  theta.cos(),
+    ]);
+    let svd = svd_jacobi(&m, 100, 1e-10).unwrap();
+    // Both singular values should be 1.0
+    assert!((svd.s[0] - 1.0).abs() < 1e-4, "s[0] = {}", svd.s[0]);
+    assert!((svd.s[1] - 1.0).abs() < 1e-4, "s[1] = {}", svd.s[1]);
+}
+
+#[test]
+fn evd_symmetric_1x1() {
+    let m = Mat::from_vec(1, 1, vec![42.0]);
+    let (evals, evecs) = evd_symmetric(&m, 100, 1e-10).unwrap();
+    assert_eq!(evals.len(), 1);
+    assert!((evals[0] - 42.0).abs() < 1e-5);
+    assert!((evecs.get(0, 0) - 1.0).abs() < 1e-5);
+}
+
+#[test]
+fn evd_symmetric_negative_eigenvalues() {
+    // [[-1, 0], [0, -2]] -> eigenvalues -1, -2
+    let m = Mat::from_vec(2, 2, vec![-1.0, 0.0, 0.0, -2.0]);
+    let (evals, _evecs) = evd_symmetric(&m, 100, 1e-10).unwrap();
+    let mut vals = evals.clone();
+    vals.sort_by(|a, b| b.partial_cmp(a).unwrap());
+    assert!((vals[0] - (-1.0)).abs() < 1e-4, "eval[0] = {}", vals[0]);
+    assert!((vals[1] - (-2.0)).abs() < 1e-4, "eval[1] = {}", vals[1]);
+}
+
+#[test]
+fn rank_for_energy_all_energy_needed() {
+    // All singular values contribute equally
+    let s = vec![1.0, 1.0, 1.0, 1.0];
+    // 99% energy: need 4 out of 4 (each contributes 1/4 = 25%)
+    assert_eq!(rank_for_energy(&s, 0.99, 1, 10), 4);
+}
+
+#[test]
+fn rank_for_energy_few_needed() {
+    // First singular value dominates
+    let s = vec![100.0, 1.0, 1.0, 1.0];
+    // 99% energy: 10000/10003 ≈ 99.97% -> k=1
+    assert_eq!(rank_for_energy(&s, 0.99, 1, 10), 1);
+}
+
+#[test]
+fn pack_lowrank_reconstruction_quality() {
+    // Build a rank-2 matrix and verify pack_lowrank + reconstruct gives good approximation
+    let m = 6usize;
+    let n = 5usize;
+    let mut data = vec![0.0f32; m * n];
+    for i in 0..m {
+        for j in 0..n {
+            data[i * n + j] = (i as f32 + 1.0) * (j as f32 + 1.0) * 0.1;
+            // Add a second component
+            data[i * n + j] += ((i as f32) * 0.5).sin() * ((j as f32) * 0.3).cos();
+        }
+    }
+    let a_mat = Mat::from_vec(m, n, data.clone());
+    let svd = svd_jacobi(&a_mat, 100, 1e-10).unwrap();
+    let (a_pack, b_pack) = pack_lowrank(&svd);
+    let recon = reconstruct(&a_pack, &b_pack);
+
+    // Full-rank reconstruction should be very accurate
+    let err: f64 = data
+        .iter()
+        .zip(recon.data.iter())
+        .map(|(a, b)| (*a as f64 - *b as f64).powi(2))
+        .sum::<f64>()
+        .sqrt();
+    let nrm = a_mat.norm_fro();
+    let rel_err = err / nrm;
+    assert!(
+        rel_err < 1e-3,
+        "pack_lowrank + reconstruct relative error = {rel_err}"
+    );
+}
+
+#[test]
+fn svd_jacobi_integer_matrix() {
+    // Matrix with integer entries
+    let m = Mat::from_vec(3, 3, vec![
+        1.0, 0.0, 0.0,
+        0.0, 2.0, 0.0,
+        0.0, 0.0, 3.0,
+    ]);
+    let svd = svd_jacobi(&m, 100, 1e-10).unwrap();
+    let mut vals = svd.s.clone();
+    vals.sort_by(|a, b| b.partial_cmp(a).unwrap());
+    assert!((vals[0] - 3.0).abs() < 1e-4);
+    assert!((vals[1] - 2.0).abs() < 1e-4);
+    assert!((vals[2] - 1.0).abs() < 1e-4);
+}
+
+#[test]
+fn svd_jacobi_near_zero_gamma_matrix() {
+    // A nearly diagonal matrix where gamma will be tiny for most pairs
+    let mut data = vec![0.0f32; 16];
+    data[0] = 10.0;
+    data[5] = 8.0;
+    data[10] = 6.0;
+    data[15] = 4.0;
+    // Tiny off-diagonal entries
+    data[1] = 1e-31;
+    data[4] = 1e-31;
+    let m = Mat::from_vec(4, 4, data);
+    let svd = svd_jacobi(&m, 100, 1e-10).unwrap();
+    let mut vals = svd.s.clone();
+    vals.sort_by(|a, b| b.partial_cmp(a).unwrap());
+    // Singular values should be close to diagonal entries
+    assert!((vals[0] - 10.0).abs() < 0.1, "s[0] = {}", vals[0]);
+    assert!((vals[1] - 8.0).abs() < 0.1, "s[1] = {}", vals[1]);
+    assert!((vals[2] - 6.0).abs() < 0.1, "s[2] = {}", vals[2]);
+    assert!((vals[3] - 4.0).abs() < 0.1, "s[3] = {}", vals[3]);
+}
+
+#[test]
+fn svd_randomized_medium_rank_matrix() {
+    // 30x30 matrix with rank-3 structure
+    let m = 30usize;
+    let n = 30usize;
+    let mut data = vec![0.0f32; m * n];
+    for k in 0..3 {
+        for i in 0..m {
+            for j in 0..n {
+                data[i * n + j] += ((i as f32 + k as f32) * 0.1).sin()
+                    * ((j as f32 + k as f32) * 0.15).cos()
+                    * ((k + 1) as f32);
+            }
+        }
+    }
+    let a = Mat::from_vec(m, n, data);
+    let svd = svd_randomized(&a, 5, 4, 2, 42).unwrap();
+    // Should capture the 3 non-zero singular values
+    assert!(svd.s[0] > 1.0, "s[0] should be large: {}", svd.s[0]);
+    assert!(svd.s[1] > 0.1, "s[1] should be non-trivial: {}", svd.s[1]);
+    assert!(svd.s[2] > 0.01, "s[2] should be non-trivial: {}", svd.s[2]);
 }
 
 #[test]

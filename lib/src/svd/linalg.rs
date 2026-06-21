@@ -13,28 +13,135 @@
 //! passed alongside. Element `(i, j)` is at index `i * n_cols + j`.
 
 use crate::error::{Error, Result};
+use std::alloc::{alloc, dealloc, Layout};
+use std::ptr::NonNull;
+
+/// A simple 32-byte aligned vector for SIMD operations.
+pub struct AlignedVec<T> {
+    ptr: NonNull<T>,
+    len: usize,
+    cap: usize,
+}
+
+impl<T> AlignedVec<T> {
+    pub fn with_capacity(capacity: usize) -> Self {
+        let layout = Layout::from_size_align(
+            capacity * std::mem::size_of::<T>(),
+            32,
+        ).expect("Invalid layout");
+        let ptr = unsafe { alloc(layout) as *mut T };
+        Self {
+            ptr: NonNull::new(ptr).expect("Allocation failed"),
+            len: 0,
+            cap: capacity,
+        }
+    }
+
+    pub fn as_ptr(&self) -> *const T {
+        self.ptr.as_ptr()
+    }
+
+    pub fn as_mut_ptr(&mut self) -> *mut T {
+        self.ptr.as_ptr()
+    }
+
+    pub fn len(&self) -> usize {
+        self.len
+    }
+
+    pub fn set_len(&mut self, len: usize) {
+        assert!(len <= self.cap);
+        self.len = len;
+    }
+
+    pub fn push(&mut self, val: T) {
+        assert!(self.len < self.cap);
+        unsafe {
+            self.ptr.as_ptr().add(self.len).write(val);
+        }
+        self.len += 1;
+    }
+}
+
+impl<T> Drop for AlignedVec<T> {
+    fn drop(&mut self) {
+        let layout = Layout::from_size_align(
+            self.cap * std::mem::size_of::<T>(),
+            32,
+        ).expect("Invalid layout");
+        unsafe {
+            dealloc(self.ptr.as_ptr() as *mut u8, layout);
+        }
+    }
+}
+
+impl<T> std::ops::Deref for AlignedVec<T> {
+    type Target = [T];
+    fn deref(&self) -> &Self::Target {
+        unsafe { std::slice::from_raw_parts(self.ptr.as_ptr(), self.len) }
+    }
+}
+
+impl<T> std::ops::DerefMut for AlignedVec<T> {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        unsafe { std::slice::from_raw_parts_mut(self.ptr.as_ptr(), self.len) }
+    }
+}
+
+impl<'a, T> IntoIterator for &'a AlignedVec<T> {
+    type Item = &'a T;
+    type IntoIter = std::slice::Iter<'a, T>;
+    fn into_iter(self) -> Self::IntoIter {
+        self.iter()
+    }
+}
+
+impl<T: Clone> Clone for AlignedVec<T> {
+    fn clone(&self) -> Self {
+        let mut new = Self::with_capacity(self.len);
+        for i in 0..self.len {
+            new.push(self[i].clone());
+        }
+        new
+    }
+}
+
+impl<T: std::fmt::Debug> std::fmt::Debug for AlignedVec<T> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_list().entries(self.iter()).finish()
+    }
+}
 
 /// Row-major dense matrix in `f32`.
 #[derive(Debug, Clone)]
 pub struct Mat {
     pub rows: usize,
     pub cols: usize,
-    pub data: Vec<f32>,
+    pub data: AlignedVec<f32>,
 }
 
 impl Mat {
     #[inline]
     pub fn new(rows: usize, cols: usize) -> Self {
+        let mut data = AlignedVec::with_capacity(rows * cols);
+        for _ in 0..rows * cols {
+            data.push(0.0);
+        }
+        data.set_len(rows * cols);
         Self {
             rows,
             cols,
-            data: vec![0.0; rows * cols],
+            data,
         }
     }
     #[inline]
     pub fn from_vec(rows: usize, cols: usize, data: Vec<f32>) -> Self {
         debug_assert_eq!(data.len(), rows * cols);
-        Self { rows, cols, data }
+        let mut aligned = AlignedVec::with_capacity(data.len());
+        for x in data {
+            aligned.push(x);
+        }
+        Self { rows, cols, data: aligned }
     }
     #[inline]
     pub fn get(&self, r: usize, c: usize) -> f32 {
@@ -243,7 +350,96 @@ pub struct Svd {
     pub vt: Mat,     // k x n
 }
 
+/// Compute the eigenvalue decomposition of a symmetric matrix `a` (n x n).
+/// Returns `(eigenvalues, eigenvectors)`.
+pub fn evd_symmetric(a: &Mat, max_sweeps: usize, tol: f64) -> Result<(Vec<f32>, Mat)> {
+    let n = a.rows;
+    if n != a.cols {
+        return Err(Error::Svd("EVD requires a square matrix".into()));
+    }
+
+    // Use f64 internally for precision.
+    let mut work_f64 = vec![0.0f64; n * n];
+    for i in 0..n * n {
+        work_f64[i] = a.data[i] as f64;
+    }
+
+    let mut v_f64 = vec![0.0f64; n * n];
+    for i in 0..n {
+        v_f64[i * n + i] = 1.0;
+    }
+
+    let mut sweep = 0;
+    let target_off = (a.norm_fro() * a.norm_fro()) * tol * tol;
+
+    while sweep < max_sweeps {
+        sweep += 1;
+        let mut off_sq = 0.0f64;
+
+        for i in 0..n {
+            for j in (i + 1)..n {
+                let a_ii = work_f64[i * n + i];
+                let a_jj = work_f64[j * n + j];
+                let a_ij = work_f64[i * n + j];
+
+                off_sq += 2.0 * a_ij * a_ij;
+
+                if a_ij.abs() < 1e-30 {
+                    continue;
+                }
+
+                let (c_rot, s_rot) = jacobi_2x2(a_ii, a_jj, a_ij);
+
+                // Update work matrix: W = R^T * W * R
+                for k in 0..n {
+                    let wik = work_f64[i * n + k];
+                    let wjk = work_f64[j * n + k];
+                    work_f64[i * n + k] = c_rot * wik + s_rot * wjk;
+                    work_f64[j * n + k] = -s_rot * wik + c_rot * wjk;
+                }
+                for k in 0..n {
+                    let wki = work_f64[k * n + i];
+                    let wkj = work_f64[k * n + j];
+                    work_f64[k * n + i] = c_rot * wki + s_rot * wkj;
+                    work_f64[k * n + j] = -s_rot * wki + c_rot * wkj;
+                }
+                // Update eigenvectors
+                for k in 0..n {
+                    let vki = v_f64[k * n + i];
+                    let vkj = v_f64[k * n + j];
+                    v_f64[k * n + i] = c_rot * vki + s_rot * vkj;
+                    v_f64[k * n + j] = -s_rot * vki + c_rot * vkj;
+                }
+            }
+        }
+
+        if off_sq <= target_off {
+            break;
+        }
+    }
+
+    let mut s = Vec::with_capacity(n);
+    for i in 0..n {
+        s.push(work_f64[i * n + i] as f32);
+    }
+
+    // Sort eigenvalues descending
+    let mut order: Vec<usize> = (0..n).collect();
+    order.sort_by(|&a, &b| s[b].partial_cmp(&s[a]).unwrap_or(std::cmp::Ordering::Equal));
+    
+    let s_sorted: Vec<f32> = order.iter().map(|&i| s[i]).collect();
+    let mut v_sorted = Mat::new(n, n);
+    for (new_c, &old_c) in order.iter().enumerate() {
+        for r in 0..n {
+            v_sorted.set(r, new_c, v_f64[r * n + old_c] as f32);
+        }
+    }
+
+    Ok((s_sorted, v_sorted))
+}
+
 /// Run one-sided Jacobi SVD on a row-major matrix `a` (m x n).
+
 ///
 /// `max_sweeps` caps the number of full sweeps (one sweep = n*(n-1)/2 pair
 /// rotations). `tol` is the convergence threshold on the off-diagonal
@@ -255,11 +451,15 @@ pub fn svd_jacobi(a: &Mat, max_sweeps: usize, tol: f64) -> Result<Svd> {
         return Err(Error::Svd("empty matrix".into()));
     }
 
-    // Work copy of A; V starts as identity.
-    let mut work = a.clone();
-    let mut v = Mat::new(n, n);
+    // Use f64 internally for precision and to avoid repeated casting.
+    let mut work_f64 = vec![0.0f64; m * n];
+    for i in 0..m * n {
+        work_f64[i] = a.data[i] as f64;
+    }
+
+    let mut v_f64 = vec![0.0f64; n * n];
     for i in 0..n {
-        v.set(i, i, 1.0);
+        v_f64[i * n + i] = 1.0;
     }
 
     let mut sweep = 0;
@@ -267,31 +467,24 @@ pub fn svd_jacobi(a: &Mat, max_sweeps: usize, tol: f64) -> Result<Svd> {
 
     while sweep < max_sweeps {
         sweep += 1;
-
-        // Track off-diagonal frobenius norm during the sweep instead of
-        // doing a separate pre-sweep convergence check. This eliminates
-        // one full pass over all n*(n-1)/2 column-pairs per sweep.
         let mut off_sq = 0.0f64;
 
         for i in 0..n {
             for j in (i + 1)..n {
-                // Compute alpha (||col_i||²), beta (||col_j||²), gamma
-                // (col_i · col_j) in one pass over rows. Unrolled ×4 for
-                // ILP and reduced loop overhead.
                 let mut alpha = 0.0f64;
                 let mut beta  = 0.0f64;
                 let mut gamma = 0.0f64;
 
                 let mut r = 0;
                 while r + 4 <= m {
-                    let x0 = work.data[r * n + i] as f64;
-                    let y0 = work.data[r * n + j] as f64;
-                    let x1 = work.data[(r + 1) * n + i] as f64;
-                    let y1 = work.data[(r + 1) * n + j] as f64;
-                    let x2 = work.data[(r + 2) * n + i] as f64;
-                    let y2 = work.data[(r + 2) * n + j] as f64;
-                    let x3 = work.data[(r + 3) * n + i] as f64;
-                    let y3 = work.data[(r + 3) * n + j] as f64;
+                    let x0 = work_f64[r * n + i];
+                    let y0 = work_f64[r * n + j];
+                    let x1 = work_f64[(r + 1) * n + i];
+                    let y1 = work_f64[(r + 1) * n + j];
+                    let x2 = work_f64[(r + 2) * n + i];
+                    let y2 = work_f64[(r + 2) * n + j];
+                    let x3 = work_f64[(r + 3) * n + i];
+                    let y3 = work_f64[(r + 3) * n + j];
 
                     alpha += x0 * x0 + x1 * x1 + x2 * x2 + x3 * x3;
                     beta  += y0 * y0 + y1 * y1 + y2 * y2 + y3 * y3;
@@ -299,43 +492,36 @@ pub fn svd_jacobi(a: &Mat, max_sweeps: usize, tol: f64) -> Result<Svd> {
 
                     r += 4;
                 }
-                // Tail: 0–3 rows.
                 for rr in r..m {
-                    let x = work.data[rr * n + i] as f64;
-                    let y = work.data[rr * n + j] as f64;
+                    let x = work_f64[rr * n + i];
+                    let y = work_f64[rr * n + j];
                     alpha += x * x;
                     beta  += y * y;
                     gamma += x * y;
                 }
 
-                // Accumulate off-diagonal energy before potentially zeroing
-                // this pair via a rotation.
                 off_sq += gamma * gamma;
 
-                if gamma == 0.0 {
+                if gamma.abs() < 1e-30 {
                     continue;
                 }
 
-                // Closed-form Jacobi rotation that diagonalizes
-                // [[alpha, gamma], [gamma, beta]].
                 let (c_rot, s_rot) = jacobi_2x2(alpha, beta, gamma);
                 if s_rot.abs() < 1e-30 {
                     continue;
                 }
 
-                // Apply to `work` columns i, j in place.
                 for r in 0..m {
-                    let xi = work.data[r * n + i];
-                    let xj = work.data[r * n + j];
-                    work.data[r * n + i] = (c_rot * xi + s_rot * xj) as f32;
-                    work.data[r * n + j] = (-s_rot * xi + c_rot * xj) as f32;
+                    let xi = work_f64[r * n + i];
+                    let xj = work_f64[r * n + j];
+                    work_f64[r * n + i] = c_rot * xi + s_rot * xj;
+                    work_f64[r * n + j] = -s_rot * xi + c_rot * xj;
                 }
-                // Apply the same rotation to V's columns i, j.
                 for r in 0..n {
-                    let vi = v.data[r * n + i];
-                    let vj = v.data[r * n + j];
-                    v.data[r * n + i] = (c_rot * vi + s_rot * vj) as f32;
-                    v.data[r * n + j] = (-s_rot * vi + c_rot * vj) as f32;
+                    let vi = v_f64[r * n + i];
+                    let vj = v_f64[r * n + j];
+                    v_f64[r * n + i] = c_rot * vi + s_rot * vj;
+                    v_f64[r * n + j] = -s_rot * vi + c_rot * vj;
                 }
             }
         }
@@ -345,45 +531,41 @@ pub fn svd_jacobi(a: &Mat, max_sweeps: usize, tol: f64) -> Result<Svd> {
         }
     }
 
-    // Singular values = column norms of `work`. U = normalized columns of `work`.
     let mut s = Vec::with_capacity(n);
     let mut u = Mat::new(m, n);
     for c in 0..n {
         let mut nrm = 0.0f64;
         for r in 0..m {
-            let x = work.data[r * n + c] as f64;
+            let x = work_f64[r * n + c];
             nrm += x * x;
         }
         let nrm = nrm.sqrt();
         s.push(nrm as f32);
-        let inv = if nrm > 0.0 { 1.0 / nrm as f32 } else { 0.0 };
+        let inv = if nrm > 0.0 { 1.0 / nrm } else { 0.0 };
         for r in 0..m {
-            u.data[r * n + c] = work.data[r * n + c] * inv;
+            u.set(r, c, (work_f64[r * n + c] * inv) as f32);
         }
     }
 
-    // Sort descending by singular value, propagating the same permutation to U and V^T.
     let mut order: Vec<usize> = (0..n).collect();
     order.sort_by(|&a, &b| s[b].partial_cmp(&s[a]).unwrap_or(std::cmp::Ordering::Equal));
     let s_sorted: Vec<f32> = order.iter().map(|&i| s[i]).collect();
     let mut u_sorted = Mat::new(m, n);
     for (new_c, &old_c) in order.iter().enumerate() {
         for r in 0..m {
-            u_sorted.data[r * n + new_c] = u.data[r * n + old_c];
+            u_sorted.set(r, new_c, u.get(r, old_c));
         }
     }
-    // V is the accumulated rotation; V^T is what we need. Apply the same perm to V's columns.
     let mut v_perm = Mat::new(n, n);
     for (new_c, &old_c) in order.iter().enumerate() {
         for r in 0..n {
-            v_perm.data[r * n + new_c] = v.data[r * n + old_c];
+            v_perm.set(r, new_c, v_f64[r * n + old_c] as f32);
         }
     }
-    // Transpose to get V^T.
     let mut vt = Mat::new(n, n);
     for i in 0..n {
         for j in 0..n {
-            vt.data[j * n + i] = v_perm.data[i * n + j];
+            vt.set(j, i, v_perm.get(i, j));
         }
     }
 
@@ -398,7 +580,7 @@ pub fn svd_jacobi(a: &Mat, max_sweeps: usize, tol: f64) -> Result<Svd> {
 /// Returns `(cos, sin)` such that the rotation `R = [[c, s], [-s, c]]`
 /// satisfies `R^T * M * R = diag(a', b')` with `a' >= b'`.
 #[inline]
-fn jacobi_2x2(a: f64, b: f64, g: f64) -> (f32, f32) {
+fn jacobi_2x2(a: f64, b: f64, g: f64) -> (f64, f64) {
     if g.abs() < 1e-30 {
         return (1.0, 0.0);
     }
@@ -411,7 +593,7 @@ fn jacobi_2x2(a: f64, b: f64, g: f64) -> (f32, f32) {
     };
     let c = 1.0 / (1.0 + t * t).sqrt();
     let s = t * c;
-    (c as f32, s as f32)
+    (c, s)
 }
 
 /// Compute the rank `k` truncated SVD using the randomized algorithm
@@ -470,16 +652,41 @@ pub fn svd_randomized(
     let qt = transpose(&q);
     let mut b = Mat::new(l, n);
     Mat::matmul_into(&qt, a, &mut b);
-    let b_svd = svd_jacobi(&b, 100, 1e-12)?;
+
+    // To avoid O(n^2 l) Jacobi SVD on B, we use the Gramian G = B*B^T (l x l).
+    // G = U_tilde * Sigma^2 * U_tilde^T.
+    let mut g = Mat::new(l, l);
+    Mat::matmul_into(&b, &transpose(&b), &mut g);
+
+    let (eigvals, u_tilde) = evd_symmetric(&g, 100, 1e-12)?;
+
+    // Singular values are sqrt of eigenvalues.
+    let mut s_full = Vec::with_capacity(l);
+    for &ev in &eigvals {
+        s_full.push(ev.max(0.0).sqrt());
+    }
+
     // Truncate to k.
-    let ks = k.min(b_svd.s.len());
-    let u_tilde = slice_cols(&b_svd.u, 0, ks);
-    let s_k: Vec<f32> = b_svd.s.iter().take(ks).copied().collect();
-    let vt = slice_rows(&b_svd.vt, 0, ks);
+    let ks = k.min(s_full.len());
+    let u_tilde_k = slice_cols(&u_tilde, 0, ks);
+    let s_k: Vec<f32> = s_full.iter().take(ks).copied().collect();
+
+    // Compute Vt = Sigma^-1 * U_tilde^T * B.
+    let mut vt = Mat::new(ks, n);
+    for i in 0..ks {
+        let inv_s = if s_k[i] > 0.0 { 1.0 / s_k[i] } else { 0.0 };
+        for j in 0..n {
+            let mut dot = 0.0f32;
+            for r in 0..l {
+                dot += u_tilde.get(r, i) * b.get(r, j);
+            }
+            vt.set(i, j, dot * inv_s);
+        }
+    }
 
     // U = Q * U_tilde (m x ks)
     let mut u = Mat::new(m, ks);
-    Mat::matmul_into(&q, &u_tilde, &mut u);
+    Mat::matmul_into(&q, &u_tilde_k, &mut u);
     Ok(Svd { u, s: s_k, vt })
 }
 
@@ -631,4 +838,710 @@ pub fn pack_lowrank(svd: &Svd) -> (Mat, Mat) {
         }
     }
     (a, b)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // ---- AlignedVec tests ----
+
+    #[test]
+    fn aligned_vec_creation_and_len() {
+        let v: AlignedVec<f32> = AlignedVec::with_capacity(16);
+        assert_eq!(v.len(), 0);
+        assert_eq!(v.as_ptr() as usize % 32, 0, "pointer must be 32-byte aligned");
+    }
+
+    #[test]
+    fn aligned_vec_push_and_deref() {
+        let mut v: AlignedVec<f32> = AlignedVec::with_capacity(4);
+        v.push(1.0);
+        v.push(2.0);
+        v.push(3.0);
+        assert_eq!(v.len(), 3);
+        assert_eq!(&*v, &[1.0, 2.0, 3.0]);
+    }
+
+    #[test]
+    fn aligned_vec_deref_mut() {
+        let mut v: AlignedVec<f32> = AlignedVec::with_capacity(4);
+        v.push(10.0);
+        v.push(20.0);
+        v[0] = 99.0;
+        assert_eq!(v[0], 99.0);
+        assert_eq!(v[1], 20.0);
+    }
+
+    #[test]
+    fn aligned_vec_clone() {
+        let mut v: AlignedVec<f32> = AlignedVec::with_capacity(4);
+        v.push(5.0);
+        v.push(10.0);
+        let cloned = v.clone();
+        assert_eq!(&*cloned, &[5.0, 10.0]);
+        assert_eq!(cloned.len(), 2);
+        // Ensure it's a deep copy
+        assert_eq!(cloned.as_ptr() as usize != v.as_ptr() as usize, true);
+    }
+
+    #[test]
+    fn aligned_vec_into_iter() {
+        let mut v: AlignedVec<f32> = AlignedVec::with_capacity(4);
+        v.push(1.0);
+        v.push(2.0);
+        v.push(3.0);
+        let sum: f32 = v.iter().sum();
+        assert!((sum - 6.0).abs() < 1e-10);
+    }
+
+    #[test]
+    fn aligned_vec_set_len() {
+        let mut v: AlignedVec<f32> = AlignedVec::with_capacity(8);
+        for i in 0..8 {
+            v.push(i as f32);
+        }
+        v.set_len(4);
+        assert_eq!(v.len(), 4);
+    }
+
+    #[test]
+    #[should_panic]
+    fn aligned_vec_set_len_exceeds_capacity() {
+        let mut v: AlignedVec<f32> = AlignedVec::with_capacity(4);
+        v.set_len(5);
+    }
+
+    #[test]
+    fn aligned_vec_debug() {
+        let mut v: AlignedVec<f32> = AlignedVec::with_capacity(4);
+        v.push(1.0);
+        let debug = format!("{:?}", v);
+        assert!(debug.contains("1.0"));
+    }
+
+    // ---- Mat tests ----
+
+    #[test]
+    fn mat_new_creates_zeroed_aligned() {
+        let m = Mat::new(3, 4);
+        assert_eq!(m.rows, 3);
+        assert_eq!(m.cols, 4);
+        assert_eq!(m.data.len(), 12);
+        for &v in &*m.data {
+            assert_eq!(v, 0.0);
+        }
+        assert_eq!(m.data.as_ptr() as usize % 32, 0);
+    }
+
+    #[test]
+    fn mat_from_vec_creates_aligned() {
+        let data = vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0];
+        let m = Mat::from_vec(2, 3, data);
+        assert_eq!(m.rows, 2);
+        assert_eq!(m.cols, 3);
+        assert_eq!(m.get(0, 0), 1.0);
+        assert_eq!(m.get(0, 2), 3.0);
+        assert_eq!(m.get(1, 0), 4.0);
+        assert_eq!(m.get(1, 2), 6.0);
+        assert_eq!(m.data.as_ptr() as usize % 32, 0);
+    }
+
+    #[test]
+    fn mat_get_set() {
+        let mut m = Mat::new(2, 3);
+        m.set(0, 0, 7.0);
+        m.set(1, 2, 13.0);
+        assert_eq!(m.get(0, 0), 7.0);
+        assert_eq!(m.get(1, 2), 13.0);
+        assert_eq!(m.get(0, 1), 0.0);
+    }
+
+    #[test]
+    fn mat_norm_fro() {
+        let m = Mat::from_vec(2, 2, vec![1.0, 2.0, 3.0, 4.0]);
+        // sqrt(1+4+9+16) = sqrt(30)
+        let expected = 30.0_f64.sqrt();
+        let nrm = m.norm_fro();
+        assert!((nrm - expected).abs() < 1e-5, "norm_fro = {nrm}, expected {expected}");
+    }
+
+    #[test]
+    fn mat_norm_fro_zero() {
+        let m = Mat::new(3, 3);
+        assert_eq!(m.norm_fro(), 0.0);
+    }
+
+    // ---- matmul tests ----
+
+    #[test]
+    fn matmul_identity() {
+        let a = Mat::from_vec(2, 3, vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0]);
+        let b = Mat::new(3, 3);
+        let mut b = b;
+        for i in 0..3 {
+            b.set(i, i, 1.0);
+        }
+        let mut out = Mat::new(2, 3);
+        Mat::matmul_into(&a, &b, &mut out);
+        for i in 0..6 {
+            assert!((a.data[i] - out.data[i]).abs() < 1e-5);
+        }
+    }
+
+    #[test]
+    fn matmul_2x2_times_2x2() {
+        let a = Mat::from_vec(2, 2, vec![1.0, 2.0, 3.0, 4.0]);
+        let b = Mat::from_vec(2, 2, vec![5.0, 6.0, 7.0, 8.0]);
+        let mut out = Mat::new(2, 2);
+        Mat::matmul_into(&a, &b, &mut out);
+        // [1*5+2*7, 1*6+2*8] = [19, 22]
+        // [3*5+4*7, 3*6+4*8] = [43, 50]
+        assert!((out.get(0, 0) - 19.0).abs() < 1e-5);
+        assert!((out.get(0, 1) - 22.0).abs() < 1e-5);
+        assert!((out.get(1, 0) - 43.0).abs() < 1e-5);
+        assert!((out.get(1, 1) - 50.0).abs() < 1e-5);
+    }
+
+    #[test]
+    fn matmul_rectangular() {
+        let a = Mat::from_vec(2, 3, vec![1.0, 0.0, 2.0, 0.0, 3.0, 1.0]);
+        let b = Mat::from_vec(3, 2, vec![4.0, 1.0, 2.0, 0.0, 0.0, 5.0]);
+        let mut out = Mat::new(2, 2);
+        Mat::matmul_into(&a, &b, &mut out);
+        // [1*4+0*2+2*0, 1*1+0*0+2*5] = [4, 11]
+        // [0*4+3*2+1*0, 0*1+3*0+1*5] = [6, 5]
+        assert!((out.get(0, 0) - 4.0).abs() < 1e-5);
+        assert!((out.get(0, 1) - 11.0).abs() < 1e-5);
+        assert!((out.get(1, 0) - 6.0).abs() < 1e-5);
+        assert!((out.get(1, 1) - 5.0).abs() < 1e-5);
+    }
+
+    #[test]
+    #[should_panic(expected = "inner dims must match")]
+    fn matmul_dimension_mismatch_panics() {
+        let a = Mat::new(2, 3);
+        let b = Mat::new(4, 2);
+        let mut out = Mat::new(2, 2);
+        Mat::matmul_into(&a, &b, &mut out);
+    }
+
+    // ---- jacobi_2x2 tests ----
+
+    #[test]
+    fn jacobi_2x2_already_diagonal() {
+        let (c, s) = jacobi_2x2(5.0, 3.0, 0.0);
+        assert!((c - 1.0).abs() < 1e-15);
+        assert!(s.abs() < 1e-15);
+    }
+
+    #[test]
+    fn jacobi_2x2_symmetric_offdiag() {
+        // Matrix [[5, 3], [3, 3]] -> eigenvalues approx 7.6056 and 0.3944
+        let (c, s) = jacobi_2x2(5.0, 3.0, 3.0);
+        // Verify the rotation diagonalizes the matrix
+        let a_f = 5.0f64;
+        let b_f = 3.0f64;
+        let g_f = 3.0f64;
+        let a_prime = c * c * a_f + 2.0 * s * c * g_f + s * s * b_f;
+        let b_prime = s * s * a_f - 2.0 * s * c * g_f + c * c * b_f;
+        let g_prime = s * c * (b_f - a_f) + (c * c - s * s) * g_f;
+        assert!(g_prime.abs() < 1e-10, "off-diagonal should be ~0, got {g_prime}");
+        assert!(a_prime > b_prime, "larger eigenvalue should be at position 0");
+        // Sum should be preserved (trace)
+        assert!((a_prime + b_prime - (a_f + b_f)).abs() < 1e-10);
+    }
+
+    #[test]
+    fn jacobi_2x2_negative_offdiag() {
+        let (c, s) = jacobi_2x2(4.0, 2.0, -3.0);
+        let a_f = 4.0f64;
+        let b_f = 2.0f64;
+        let g_f = -3.0f64;
+        let g_prime = s * c * (b_f - a_f) + (c * c - s * s) * g_f;
+        assert!(g_prime.abs() < 1e-10, "off-diagonal should be ~0, got {g_prime}");
+    }
+
+    #[test]
+    fn jacobi_2x2_large_condition_number() {
+        let (c, s) = jacobi_2x2(1000.0, 1.0, 10.0);
+        let a_f = 1000.0f64;
+        let b_f = 1.0f64;
+        let g_f = 10.0f64;
+        let g_prime = s * c * (b_f - a_f) + (c * c - s * s) * g_f;
+        assert!(g_prime.abs() < 1e-6, "off-diagonal should be ~0, got {g_prime}");
+    }
+
+    // ---- svd_jacobi tests ----
+
+    #[test]
+    fn svd_jacobi_empty_matrix_returns_error() {
+        let m = Mat::new(0, 5);
+        assert!(svd_jacobi(&m, 100, 1e-6).is_err());
+        let m = Mat::new(5, 0);
+        assert!(svd_jacobi(&m, 100, 1e-6).is_err());
+    }
+
+    #[test]
+    fn svd_jacobi_2x2_identity() {
+        let m = Mat::from_vec(2, 2, vec![1.0, 0.0, 0.0, 1.0]);
+        let svd = svd_jacobi(&m, 100, 1e-10).unwrap();
+        assert_eq!(svd.s.len(), 2);
+        assert!((svd.s[0] - 1.0).abs() < 1e-4);
+        assert!((svd.s[1] - 1.0).abs() < 1e-4);
+    }
+
+    #[test]
+    fn svd_jacobi_2x2_diagonal() {
+        let m = Mat::from_vec(2, 2, vec![3.0, 0.0, 0.0, 1.0]);
+        let svd = svd_jacobi(&m, 100, 1e-10).unwrap();
+        let mut vals = svd.s.clone();
+        vals.sort_by(|a, b| b.partial_cmp(a).unwrap());
+        assert!((vals[0] - 3.0).abs() < 1e-4);
+        assert!((vals[1] - 1.0).abs() < 1e-4);
+    }
+
+    #[test]
+    fn svd_jacobi_3x3_random_reconstruction() {
+        let data = vec![
+            1.0, 2.0, 3.0,
+            4.0, 5.0, 6.0,
+            7.0, 8.0, 0.0,
+        ];
+        let m = Mat::from_vec(3, 3, data.clone());
+        let svd = svd_jacobi(&m, 100, 1e-10).unwrap();
+
+        // Reconstruct: A ≈ U * diag(s) * V^T
+        let mut recon = Mat::new(3, 3);
+        for i in 0..3 {
+            for j in 0..3 {
+                let mut val = 0.0f64;
+                for p in 0..svd.s.len() {
+                    val += svd.u.get(i, p) as f64 * svd.s[p] as f64 * svd.vt.get(p, j) as f64;
+                }
+                recon.set(i, j, val as f32);
+            }
+        }
+
+        for i in 0..9 {
+            assert!(
+                (data[i] - recon.data[i]).abs() < 1e-3,
+                "recon error at {i}: {} vs {}",
+                data[i],
+                recon.data[i]
+            );
+        }
+    }
+
+    #[test]
+    fn svd_jacobi_reduced_sweeps_converges() {
+        // Even with reduced sweeps=20 and tol=1e-6, a well-conditioned matrix
+        // should converge.
+        let data: Vec<f32> = (0..16).map(|i| ((i as f32) * 0.3).sin() * 2.0).collect();
+        let m = Mat::from_vec(4, 4, data);
+        let svd = svd_jacobi(&m, 20, 1e-6).unwrap();
+
+        // Reconstruct and check error
+        let mut recon = Mat::new(4, 4);
+        for i in 0..4 {
+            for j in 0..4 {
+                let mut val = 0.0f64;
+                for p in 0..svd.s.len() {
+                    val += svd.u.get(i, p) as f64 * svd.s[p] as f64 * svd.vt.get(p, j) as f64;
+                }
+                recon.set(i, j, val as f32);
+            }
+        }
+        let err: f64 = (0..16)
+            .map(|i| (m.data[i] as f64 - recon.data[i] as f64).powi(2))
+            .sum::<f64>()
+            .sqrt();
+        let nrm = m.norm_fro();
+        let rel_err = err / nrm;
+        assert!(rel_err < 1e-3, "relative reconstruction error = {rel_err}");
+    }
+
+    #[test]
+    fn svd_jacobi_2x2_symmetric_matrix() {
+        let data = vec![2.0, 1.0, 1.0, 2.0];
+        let m = Mat::from_vec(2, 2, data);
+        let svd = svd_jacobi(&m, 100, 1e-10).unwrap();
+        let mut vals = svd.s.clone();
+        vals.sort_by(|a, b| b.partial_cmp(a).unwrap());
+        // eigenvalues of [[2,1],[1,2]] are 3 and 1
+        assert!((vals[0] - 3.0).abs() < 1e-3, "s[0] = {}", vals[0]);
+        assert!((vals[1] - 1.0).abs() < 1e-3, "s[1] = {}", vals[1]);
+    }
+
+    // ---- evd_symmetric tests ----
+
+    #[test]
+    fn evd_symmetric_requires_square() {
+        let m = Mat::new(3, 4);
+        assert!(evd_symmetric(&m, 100, 1e-10).is_err());
+    }
+
+    #[test]
+    fn evd_symmetric_identity() {
+        let m = Mat::from_vec(3, 3, vec![1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0]);
+        let (evals, evecs) = evd_symmetric(&m, 100, 1e-10).unwrap();
+        let mut vals = evals.clone();
+        vals.sort_by(|a, b| b.partial_cmp(a).unwrap());
+        assert!((vals[0] - 1.0).abs() < 1e-4);
+        assert!((vals[1] - 1.0).abs() < 1e-4);
+        assert!((vals[2] - 1.0).abs() < 1e-4);
+        // Check eigenvectors are orthonormal
+        let mut eye = Mat::new(3, 3);
+        Mat::matmul_into(&evecs, &transpose(&evecs), &mut eye);
+        for i in 0..3 {
+            for j in 0..3 {
+                let expected = if i == j { 1.0 } else { 0.0 };
+                assert!(
+                    (eye.get(i, j) - expected).abs() < 1e-4,
+                    "V^T V [{i},{j}] = {}",
+                    eye.get(i, j)
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn evd_symmetric_diagonal_matrix() {
+        let m = Mat::from_vec(3, 3, vec![5.0, 0.0, 0.0, 0.0, 3.0, 0.0, 0.0, 0.0, 1.0]);
+        let (evals, _evecs) = evd_symmetric(&m, 100, 1e-10).unwrap();
+        let mut vals = evals.clone();
+        vals.sort_by(|a, b| b.partial_cmp(a).unwrap());
+        assert!((vals[0] - 5.0).abs() < 1e-4);
+        assert!((vals[1] - 3.0).abs() < 1e-4);
+        assert!((vals[2] - 1.0).abs() < 1e-4);
+    }
+
+    #[test]
+    fn evd_symmetric_2x2_known_eigenvalues() {
+        // [[4, 2], [2, 3]] -> eigenvalues (7 ± √17)/2 ≈ 5.562 and 1.438
+        let m = Mat::from_vec(2, 2, vec![4.0, 2.0, 2.0, 3.0]);
+        let (evals, _evecs) = evd_symmetric(&m, 100, 1e-10).unwrap();
+        let mut vals = evals.clone();
+        vals.sort_by(|a, b| b.partial_cmp(a).unwrap());
+        let expected_0 = (7.0 + 17.0_f64.sqrt()) / 2.0;
+        let expected_1 = (7.0 - 17.0_f64.sqrt()) / 2.0;
+        assert!((vals[0] as f64 - expected_0).abs() < 1e-3, "eval[0] = {}", vals[0]);
+        assert!((vals[1] as f64 - expected_1).abs() < 1e-3, "eval[1] = {}", vals[1]);
+    }
+
+    #[test]
+    fn evd_symmetric_eigenvector_orthogonality() {
+        let m = Mat::from_vec(3, 3, vec![
+            2.0, 1.0, 0.0,
+            1.0, 3.0, 1.0,
+            0.0, 1.0, 2.0,
+        ]);
+        let (_evals, evecs) = evd_symmetric(&m, 200, 1e-12).unwrap();
+        // V^T * V should be ~ identity
+        let mut vt_v = Mat::new(3, 3);
+        Mat::matmul_into(&transpose(&evecs), &evecs, &mut vt_v);
+        for i in 0..3 {
+            for j in 0..3 {
+                let expected = if i == j { 1.0 } else { 0.0 };
+                assert!(
+                    (vt_v.get(i, j) - expected).abs() < 1e-4,
+                    "V^T V [{i},{j}] = {}",
+                    vt_v.get(i, j)
+                );
+            }
+        }
+    }
+
+    // ---- svd_randomized tests ----
+
+    #[test]
+    fn svd_randomized_empty_returns_error() {
+        let m = Mat::new(0, 5);
+        assert!(svd_randomized(&m, 2, 4, 2, 42).is_err());
+    }
+
+    #[test]
+    fn svd_randomized_rank_zero_returns_error() {
+        let m = Mat::from_vec(5, 5, (0..25).map(|i| i as f32).collect());
+        assert!(svd_randomized(&m, 0, 4, 2, 42).is_err());
+    }
+
+    #[test]
+    fn svd_randomized_small_rank1_matrix() {
+        // Rank-1 matrix: outer product
+        let m = 8usize;
+        let n = 6usize;
+        let u: Vec<f32> = (0..m).map(|i| (i as f32 + 1.0) * 0.5).collect();
+        let v: Vec<f32> = (0..n).map(|j| (j as f32 + 1.0) * 0.3).collect();
+        let mut data = vec![0.0f32; m * n];
+        for i in 0..m {
+            for j in 0..n {
+                data[i * n + j] = u[i] * v[j];
+            }
+        }
+        let a = Mat::from_vec(m, n, data);
+        let svd = svd_randomized(&a, 3, 4, 2, 42).unwrap();
+        assert!(svd.s.len() >= 1);
+        // Top singular value should dominate
+        assert!(svd.s[0] > svd.s[1] * 10.0);
+    }
+
+    #[test]
+    fn svd_randomized_matches_jacobi_on_small_matrix() {
+        // Use a well-conditioned matrix where all singular values are
+        // significantly above zero. The Gramian approach (evd on B*B^T)
+        // squares eigenvalues, so smaller singular values are less accurate.
+        // Test the top singular value which is the most reliable.
+        let m = 20usize;
+        let n = 15usize;
+        let data: Vec<f32> = (0..m * n)
+            .map(|i| (i as f32 * 0.1).sin() * 3.0 + 1.0)
+            .collect();
+        let a = Mat::from_vec(m, n, data);
+        let s_rand = svd_randomized(&a, 5, 4, 2, 42).unwrap();
+        let s_jac = svd_jacobi(&a, 100, 1e-10).unwrap();
+        // Top singular value should match within 5%. The Gramian approach
+        // is most accurate for the dominant eigenvalue.
+        assert!(!s_rand.s.is_empty() && !s_jac.s.is_empty());
+        let ratio = s_rand.s[0] / s_jac.s[0];
+        assert!(
+            (ratio - 1.0).abs() < 0.05,
+            "s_rand[0]={} vs s_jac[0]={}",
+            s_rand.s[0],
+            s_jac.s[0]
+        );
+        // Frobenius norms of the singular values should be close
+        let norm_rand: f32 = s_rand.s.iter().map(|x| x * x).sum::<f32>().sqrt();
+        let norm_jac: f32 = s_jac.s.iter().take(s_rand.s.len()).map(|x| x * x).sum::<f32>().sqrt();
+        let norm_ratio = norm_rand / norm_jac;
+        assert!(
+            (norm_ratio - 1.0).abs() < 0.1,
+            "frobenius norm ratio: {}",
+            norm_ratio
+        );
+    }
+
+    // ---- rank_for_energy tests ----
+
+    #[test]
+    fn rank_for_energy_empty_s() {
+        assert_eq!(rank_for_energy(&[], 0.99, 2, 10), 2);
+    }
+
+    #[test]
+    fn rank_for_energy_all_zero() {
+        let s = vec![0.0, 0.0, 0.0];
+        assert_eq!(rank_for_energy(&s, 0.99, 1, 10), 1);
+    }
+
+    #[test]
+    fn rank_for_energy_single_dominant() {
+        let s = vec![100.0, 0.1, 0.01];
+        // 100^2 = 10000, total ≈ 10000.01, 99% = 9900.01 -> k=1
+        assert_eq!(rank_for_energy(&s, 0.99, 1, 10), 1);
+    }
+
+    #[test]
+    fn rank_for_energy_needs_two() {
+        let s = vec![10.0, 10.0, 0.1, 0.01];
+        // 100+100+0.01+0.0001 = 200.0101, 99% = 198.01 -> need both 10s
+        assert_eq!(rank_for_energy(&s, 0.99, 1, 10), 2);
+    }
+
+    #[test]
+    fn rank_for_energy_clamped_to_max() {
+        let s = vec![1.0, 1.0, 1.0, 1.0, 1.0];
+        assert_eq!(rank_for_energy(&s, 0.99, 1, 3), 3);
+    }
+
+    #[test]
+    fn rank_for_energy_clamped_to_min() {
+        let s = vec![100.0];
+        assert_eq!(rank_for_energy(&s, 0.99, 4, 10), 4);
+    }
+
+    // ---- pack_lowrank and reconstruct tests ----
+
+    #[test]
+    fn pack_lowrank_preserves_rank1() {
+        let data = vec![
+            1.0, 2.0, 3.0,
+            2.0, 4.0, 6.0,
+        ];
+        let m = Mat::from_vec(2, 3, data.clone());
+        let svd = svd_jacobi(&m, 100, 1e-10).unwrap();
+        let (a, b) = pack_lowrank(&svd);
+        assert_eq!(a.rows, 2);
+        assert_eq!(a.cols, svd.s.len());
+        assert_eq!(b.rows, svd.s.len());
+        assert_eq!(b.cols, 3);
+
+        // Reconstruct
+        let mut recon = Mat::new(2, 3);
+        Mat::matmul_into(&a, &b, &mut recon);
+        for i in 0..6 {
+            assert!(
+                (data[i] - recon.data[i]).abs() < 1e-3,
+                "recon[{i}] = {} vs {}",
+                recon.data[i],
+                data[i]
+            );
+        }
+    }
+
+    #[test]
+    fn reconstruct_matches_matmul() {
+        let a = Mat::from_vec(3, 2, vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0]);
+        let b = Mat::from_vec(2, 3, vec![7.0, 8.0, 9.0, 10.0, 11.0, 12.0]);
+        let out = reconstruct(&a, &b);
+        let mut expected = Mat::new(3, 3);
+        Mat::matmul_into(&a, &b, &mut expected);
+        for i in 0..9 {
+            assert!((out.data[i] - expected.data[i]).abs() < 1e-10);
+        }
+    }
+
+    // ---- slice_cols and slice_rows tests ----
+
+    #[test]
+    fn slice_cols_extracts_correct_columns() {
+        let m = Mat::from_vec(2, 4, vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0]);
+        let s = slice_cols(&m, 1, 2);
+        assert_eq!(s.rows, 2);
+        assert_eq!(s.cols, 2);
+        assert_eq!(s.get(0, 0), 2.0);
+        assert_eq!(s.get(0, 1), 3.0);
+        assert_eq!(s.get(1, 0), 6.0);
+        assert_eq!(s.get(1, 1), 7.0);
+    }
+
+    #[test]
+    fn slice_rows_extracts_correct_rows() {
+        let m = Mat::from_vec(4, 3, vec![
+            1.0, 2.0, 3.0,
+            4.0, 5.0, 6.0,
+            7.0, 8.0, 9.0,
+            10.0, 11.0, 12.0,
+        ]);
+        let s = slice_rows(&m, 1, 2);
+        assert_eq!(s.rows, 2);
+        assert_eq!(s.cols, 3);
+        assert_eq!(s.get(0, 0), 4.0);
+        assert_eq!(s.get(0, 2), 6.0);
+        assert_eq!(s.get(1, 0), 7.0);
+        assert_eq!(s.get(1, 2), 9.0);
+    }
+
+    // ---- transpose tests ----
+
+    #[test]
+    fn transpose_2x3_to_3x2() {
+        let m = Mat::from_vec(2, 3, vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0]);
+        let t = transpose(&m);
+        assert_eq!(t.rows, 3);
+        assert_eq!(t.cols, 2);
+        assert_eq!(t.get(0, 0), 1.0);
+        assert_eq!(t.get(0, 1), 4.0);
+        assert_eq!(t.get(2, 0), 3.0);
+        assert_eq!(t.get(2, 1), 6.0);
+    }
+
+    // ---- orthonormalize_cols tests ----
+
+    #[test]
+    fn orthonormalize_cols_produces_orthonormal() {
+        let m = Mat::from_vec(4, 3, vec![
+            1.0, 0.0, 1.0,
+            0.0, 1.0, 1.0,
+            1.0, 1.0, 0.0,
+            0.0, 0.0, 1.0,
+        ]);
+        let q = orthonormalize_cols(&m);
+        // Check each column has unit norm
+        for j in 0..3 {
+            let mut nrm = 0.0f64;
+            for i in 0..4 {
+                let v = q.get(i, j) as f64;
+                nrm += v * v;
+            }
+            assert!(
+                (nrm - 1.0).abs() < 1e-4,
+                "column {j} norm = {nrm}"
+            );
+        }
+        // Check orthogonality
+        for j1 in 0..3 {
+            for j2 in (j1 + 1)..3 {
+                let mut dot = 0.0f64;
+                for i in 0..4 {
+                    dot += q.get(i, j1) as f64 * q.get(i, j2) as f64;
+                }
+                assert!(
+                    dot.abs() < 1e-4,
+                    "columns {j1},{j2} not orthogonal: dot={dot}"
+                );
+            }
+        }
+    }
+
+    // ---- SVD structure tests ----
+
+    #[test]
+    fn svd_jacobi_output_shapes() {
+        let m = Mat::from_vec(5, 3, (0..15).map(|i| i as f32).collect());
+        let svd = svd_jacobi(&m, 100, 1e-10).unwrap();
+        let rank = 5.min(3);
+        assert_eq!(svd.u.rows, 5);
+        assert_eq!(svd.u.cols, rank);
+        assert_eq!(svd.s.len(), rank);
+        assert_eq!(svd.vt.rows, rank);
+        assert_eq!(svd.vt.cols, 3);
+    }
+
+    #[test]
+    fn svd_jacobi_singular_values_non_negative() {
+        let data: Vec<f32> = (0..20).map(|i| ((i as f32) - 10.0) * 0.5).collect();
+        let m = Mat::from_vec(4, 5, data);
+        let svd = svd_jacobi(&m, 100, 1e-10).unwrap();
+        for &s in &svd.s {
+            assert!(s >= 0.0, "singular value should be non-negative: {s}");
+        }
+    }
+
+    #[test]
+    fn svd_jacobi_singular_values_sorted_descending() {
+        let data: Vec<f32> = (0..20).map(|i| ((i as f32) * 0.3).sin() * 5.0).collect();
+        let m = Mat::from_vec(4, 5, data);
+        let svd = svd_jacobi(&m, 100, 1e-10).unwrap();
+        for i in 0..svd.s.len() - 1 {
+            assert!(
+                svd.s[i] >= svd.s[i + 1] - 1e-5,
+                "singular values not sorted: s[{}]={} < s[{}]={}",
+                i,
+                svd.s[i],
+                i + 1,
+                svd.s[i + 1]
+            );
+        }
+    }
+
+    // ---- Gamma epsilon check (gamma.abs() < 1e-30) ----
+
+    #[test]
+    fn svd_jacobi_near_zero_gamma() {
+        // Construct a matrix where gamma for one pair will be extremely small
+        // (diagonal dominant with tiny off-diagonal).
+        let mut data = vec![0.0f32; 9];
+        data[0] = 100.0;
+        data[4] = 100.0;
+        data[8] = 100.0;
+        data[1] = 1e-31; // tiny off-diagonal
+        data[3] = 1e-31;
+        let m = Mat::from_vec(3, 3, data);
+        let svd = svd_jacobi(&m, 100, 1e-10).unwrap();
+        // Should converge quickly for nearly-diagonal matrix
+        let mut vals = svd.s.clone();
+        vals.sort_by(|a, b| b.partial_cmp(a).unwrap());
+        assert!((vals[0] - 100.0).abs() < 0.1);
+    }
 }

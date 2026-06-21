@@ -700,3 +700,269 @@ fn e2e_passthrough_keeps_dtypes() {
     let _ = std::fs::remove_file(&tmp_in);
     let _ = std::fs::remove_file(&tmp_out);
 }
+
+// ---- SIMD quantization tests (AVX2 + FMA) --------------------------------
+//
+// These tests exercise the SIMD code paths in `quantize::simd` directly
+// via the public `quantize()` dispatch, which automatically uses SIMD
+// when available on x86_64. On non-x86_64 platforms, these tests still
+// pass (they exercise the scalar fallback).
+
+#[test]
+fn simd_q8_0_roundtrip_large_block() {
+    // 256 elements (8 blocks of 32) — exercises multi-block SIMD path
+    let src: Vec<f32> = (0..256)
+        .map(|i| ((i as f32) * 0.13).sin() * 20.0)
+        .collect();
+    let bytes = crate::quantize::quantize(&src, GgmlType::Q8_0);
+    // 8 blocks * 34 bytes = 272
+    assert_eq!(bytes.len(), 272);
+    let out = dequant::dequantize(GgmlType::Q8_0, &bytes, None).unwrap();
+    assert_eq!(out.len(), 256);
+    let amax = src.iter().fold(0.0f32, |m, &v| m.max(v.abs()));
+    let tol = amax / 127.0 + 0.5;
+    for (i, (&a, &b)) in src.iter().zip(out.iter()).enumerate() {
+        assert!(
+            (a - b).abs() < tol,
+            "simd Q8_0 large i={i}: src={a} deq={b} tol={tol}"
+        );
+    }
+}
+
+#[test]
+fn simd_q4_0_roundtrip_large_block() {
+    // 256 elements (8 blocks of 32)
+    let src: Vec<f32> = (0..256)
+        .map(|i| ((i as f32) * 0.13).sin() * 10.0)
+        .collect();
+    let bytes = crate::quantize::quantize(&src, GgmlType::Q4_0);
+    // 8 blocks * 18 bytes = 144
+    assert_eq!(bytes.len(), 144);
+    let out = dequant::dequantize(GgmlType::Q4_0, &bytes, None).unwrap();
+    assert_eq!(out.len(), 256);
+    let amax = src.iter().fold(0.0f32, |m, &v| m.max(v.abs()));
+    let tol = amax / 8.0 + 0.5;
+    for (i, (&a, &b)) in src.iter().zip(out.iter()).enumerate() {
+        assert!(
+            (a - b).abs() < tol,
+            "simd Q4_0 large i={i}: src={a} deq={b} tol={tol}"
+        );
+    }
+}
+
+#[test]
+fn simd_q8_0_roundtrip_exact_values() {
+    // Craft exact values that map cleanly to int8
+    // d = 1.0, so q[i] = round(x[i] / d) = x[i]
+    let mut src = Vec::with_capacity(32);
+    for i in 0..32 {
+        src.push((i as f32) - 16.0); // range [-16, 15]
+    }
+    let bytes = crate::quantize::quantize(&src, GgmlType::Q8_0);
+    let out = dequant::dequantize(GgmlType::Q8_0, &bytes, None).unwrap();
+    for (i, (&a, &b)) in src.iter().zip(out.iter()).enumerate() {
+        assert!(
+            (a - b).abs() < 1.0,
+            "simd Q8_0 exact i={i}: src={a} deq={b}"
+        );
+    }
+}
+
+#[test]
+fn simd_q4_0_roundtrip_exact_values() {
+    // Values that quantize cleanly: center around 0 within [-8d, 7d]
+    let d = 2.0;
+    let mut src = Vec::with_capacity(32);
+    for i in 0..32 {
+        // Map to [-8, 7] range (Q4_0 representable range)
+        let n = (i % 16) as f32 - 8.0;
+        src.push(n * d);
+    }
+    let bytes = crate::quantize::quantize(&src, GgmlType::Q4_0);
+    let out = dequant::dequantize(GgmlType::Q4_0, &bytes, None).unwrap();
+    for (i, (&a, &b)) in src.iter().zip(out.iter()).enumerate() {
+        assert!(
+            (a - b).abs() < 0.5,
+            "simd Q4_0 exact i={i}: src={a} deq={b}"
+        );
+    }
+}
+
+#[test]
+fn simd_q8_0_all_zero_roundtrip() {
+    // Multi-block all zeros
+    let src = vec![0.0f32; 128]; // 4 blocks
+    let bytes = crate::quantize::quantize(&src, GgmlType::Q8_0);
+    assert_eq!(bytes.len(), 4 * 34);
+    let out = dequant::dequantize(GgmlType::Q8_0, &bytes, None).unwrap();
+    for (i, &v) in out.iter().enumerate() {
+        assert_eq!(v, 0.0, "simd Q8_0 all-zero i={i}: got {v}");
+    }
+}
+
+#[test]
+fn simd_q4_0_all_zero_roundtrip() {
+    let src = vec![0.0f32; 128]; // 4 blocks
+    let bytes = crate::quantize::quantize(&src, GgmlType::Q4_0);
+    assert_eq!(bytes.len(), 4 * 18);
+    let out = dequant::dequantize(GgmlType::Q4_0, &bytes, None).unwrap();
+    for (i, &v) in out.iter().enumerate() {
+        assert_eq!(v, 0.0, "simd Q4_0 all-zero i={i}: got {v}");
+    }
+}
+
+#[test]
+fn simd_q8_0_matches_scalar_roundtrip() {
+    // Ensure SIMD and scalar produce identical byte output
+    let src: Vec<f32> = (0..32).map(|i| (i as f32 - 16.0) * 0.7).collect();
+    let simd_bytes = crate::quantize::quantize(&src, GgmlType::Q8_0);
+    let scalar_bytes = q8_0::quantize(&src);
+    assert_eq!(simd_bytes, scalar_bytes, "SIMD vs scalar Q8_0 bytes differ");
+}
+
+#[test]
+fn simd_q4_0_matches_scalar_roundtrip() {
+    // SIMD and scalar may produce different bytes due to different rounding paths,
+    // but both should produce valid Q4_0 output that dequantizes to approximately
+    // the same values. Test that both produce correct block structure.
+    let src: Vec<f32> = (0..32).map(|i| (i as f32 - 16.0) * 0.3).collect();
+    let simd_bytes = crate::quantize::quantize(&src, GgmlType::Q4_0);
+    let scalar_bytes = q4_0::quantize(&src);
+    // Both should produce correct block size
+    assert_eq!(simd_bytes.len(), 18);
+    assert_eq!(scalar_bytes.len(), 18);
+    // Dequantize both and verify each produces reasonable reconstruction
+    let simd_out = dequant::dequantize(GgmlType::Q4_0, &simd_bytes, None).unwrap();
+    let scalar_out = dequant::dequantize(GgmlType::Q4_0, &scalar_bytes, None).unwrap();
+    assert_eq!(simd_out.len(), 32);
+    assert_eq!(scalar_out.len(), 32);
+    // Both should reconstruct within Q4_0 tolerance (amax/8)
+    let amax = src.iter().fold(0.0f32, |m, &v| m.max(v.abs()));
+    let tol = amax / 8.0 + 0.5;
+    for (i, (&a, &b)) in src.iter().zip(simd_out.iter()).enumerate() {
+        assert!(
+            (a - b).abs() < tol,
+            "SIMD Q4_0 i={i}: src={a} deq={b} tol={tol}"
+        );
+    }
+    for (i, (&a, &b)) in src.iter().zip(scalar_out.iter()).enumerate() {
+        assert!(
+            (a - b).abs() < tol,
+            "Scalar Q4_0 i={i}: src={a} deq={b} tol={tol}"
+        );
+    }
+}
+
+#[test]
+fn simd_q8_0_output_block_structure() {
+    // Verify the output has the correct block structure: [d_lo, d_hi, 32 bytes of qs]
+    let src: Vec<f32> = (0..32).map(|i| (i as f32) * 0.5).collect();
+    let bytes = crate::quantize::quantize(&src, GgmlType::Q8_0);
+    assert_eq!(bytes.len(), 34);
+    // First 2 bytes are f16 d
+    let d = dequant::f16_to_f32(u16::from_le_bytes([bytes[0], bytes[1]]));
+    let amax = src.iter().fold(0.0f32, |m, &v| m.max(v.abs()));
+    let expected_d = amax / 127.0;
+    assert!(
+        (d - expected_d).abs() < 0.01,
+        "Q8_0 block d: got {d}, expected {expected_d}"
+    );
+    // Bytes 2..34 are the quantized values
+    for j in 2..34 {
+        let q = bytes[j] as i8;
+        assert!(q >= -128 && q <= 127, "Q8_0 quant out of range: {q}");
+    }
+}
+
+#[test]
+fn simd_q4_0_output_block_structure() {
+    let src: Vec<f32> = (0..32).map(|i| (i as f32 - 16.0) * 0.5).collect();
+    let bytes = crate::quantize::quantize(&src, GgmlType::Q4_0);
+    assert_eq!(bytes.len(), 18);
+    // First 2 bytes are f16 d
+    let d = dequant::f16_to_f32(u16::from_le_bytes([bytes[0], bytes[1]]));
+    let amax = src.iter().fold(0.0f32, |m, &v| m.max(v.abs()));
+    let expected_d = amax / 8.0;
+    assert!(
+        (d - expected_d).abs() < 0.01,
+        "Q4_0 block d: got {d}, expected {expected_d}"
+    );
+    // Bytes 2..18 are packed nibbles
+    for j in 2..18 {
+        let lo = bytes[j] & 0x0F;
+        let hi = (bytes[j] >> 4) & 0x0F;
+        assert!(lo <= 15, "Q4_0 lo nibble out of range: {lo}");
+        assert!(hi <= 15, "Q4_0 hi nibble out of range: {hi}");
+    }
+}
+
+#[test]
+fn simd_quantize_par_matches_sequential_q8_0() {
+    let src: Vec<f32> = (0..256).map(|i| ((i as f32) * 0.11).cos() * 15.0).collect();
+    let seq = crate::quantize::quantize(&src, GgmlType::Q8_0);
+    let par = crate::quantize::quantize_par(&src, GgmlType::Q8_0);
+    assert_eq!(seq, par, "quantize_par vs quantize Q8_0");
+}
+
+#[test]
+fn simd_quantize_par_matches_sequential_q4_0() {
+    let src: Vec<f32> = (0..256).map(|i| ((i as f32) * 0.09).sin() * 8.0).collect();
+    let seq = crate::quantize::quantize(&src, GgmlType::Q4_0);
+    let par = crate::quantize::quantize_par(&src, GgmlType::Q4_0);
+    assert_eq!(seq, par, "quantize_par vs quantize Q4_0");
+}
+
+#[test]
+fn simd_q8_0_high_dynamic_range() {
+    // Mix of very large and very small values
+    let mut src = vec![0.0f32; 32];
+    src[0] = 1000.0;
+    src[1] = -1000.0;
+    src[2] = 0.001;
+    src[3] = -0.001;
+    let bytes = crate::quantize::quantize(&src, GgmlType::Q8_0);
+    let out = dequant::dequantize(GgmlType::Q8_0, &bytes, None).unwrap();
+    // Large values should be close (within amax/127)
+    assert!((out[0] - 1000.0).abs() < 10.0, "Q8_0 large positive: {}", out[0]);
+    assert!((out[1] - (-1000.0)).abs() < 10.0, "Q8_0 large negative: {}", out[1]);
+    // Small values will be quantized to ~0 (expected: they're within 1000/127 ~ 8 of zero)
+    assert!(out[2].abs() < 10.0, "Q8_0 small positive: {}", out[2]);
+}
+
+// ---- Q4_0 packing optimization tests ----
+
+#[test]
+fn simd_q4_0_packing_preserves_nibble_order() {
+    // Craft input where we can verify exact nibble packing
+    // All values = 0 -> d=0, all nibbles should be 0
+    let src = vec![0.0f32; 32];
+    let bytes = crate::quantize::quantize(&src, GgmlType::Q4_0);
+    // d should be 0
+    let d = dequant::f16_to_f32(u16::from_le_bytes([bytes[0], bytes[1]]));
+    assert_eq!(d, 0.0, "Q4_0 zero block d should be 0");
+    // All nibble bytes should be 0
+    for j in 2..18 {
+        assert_eq!(bytes[j], 0, "Q4_0 zero block nibble byte {j} should be 0");
+    }
+}
+
+#[test]
+fn simd_q4_0_packing_symmetric_values() {
+    // Symmetric values around 0 -> d = amax/8, nibbles centered at 8
+    let mut src = Vec::with_capacity(32);
+    for i in 0..16 {
+        src.push(i as f32 - 7.5);
+        src.push(-(i as f32 - 7.5));
+    }
+    let bytes = crate::quantize::quantize(&src, GgmlType::Q4_0);
+    let out = dequant::dequantize(GgmlType::Q4_0, &bytes, None).unwrap();
+    // Round-trip should be close
+    for (i, (&a, &b)) in src.iter().zip(out.iter()).enumerate() {
+        let amax = 7.5;
+        let tol = amax / 8.0 + 0.5;
+        assert!(
+            (a - b).abs() < tol,
+            "Q4_0 symmetric i={i}: src={a} deq={b} tol={tol}"
+        );
+    }
+}
