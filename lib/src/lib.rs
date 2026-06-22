@@ -65,6 +65,10 @@ pub use svd::{
     transpose, LayerSelection, OutputDtype, RankClamps, RankSpec, RankSpecWithClamps, SvdApplied,
     SvdBackend, SvdConfig, SvdPlan, SvdReport, SvdTarget, TensorSelection, AlignedVec, Mat, Svd,
 };
+pub use infer::{
+    WeightProvider, ModelHyperparams, InterpretationSnapshot,
+    interpret::ExpertStats,
+};
 
 pub fn git_version() -> &'static str {
     env!("GIT_VERSION")

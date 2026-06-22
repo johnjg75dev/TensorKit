@@ -38,6 +38,9 @@ pub fn rope_inplace(q: &mut [f32], k: &mut [f32], pos: usize, head_dim: usize) {
     for h in 0..n_heads_q {
         let base = h * head_dim;
         for i in (0..head_dim).step_by(2) {
+            if i + 1 >= head_dim {
+                continue;
+            }
             let theta = (pos as f32) * 10000.0f32.powf(-(i as f32 / head_dim as f32));
             let cos = theta.cos();
             let sin = theta.sin();
@@ -50,6 +53,9 @@ pub fn rope_inplace(q: &mut [f32], k: &mut [f32], pos: usize, head_dim: usize) {
     for h in 0..n_heads_k {
         let base = h * head_dim;
         for i in (0..head_dim).step_by(2) {
+            if i + 1 >= head_dim {
+                continue;
+            }
             let theta = (pos as f32) * 10000.0f32.powf(-(i as f32 / head_dim as f32));
             let cos = theta.cos();
             let sin = theta.sin();
@@ -77,11 +83,17 @@ pub fn softmax(x: &mut [f32], n_cols: usize) {
     }
 }
 
-/// SiLU activation: x * sigmoid(x)
+/// SiLU activation (in-place): x * sigmoid(x)
 pub fn silu(x: &mut [f32]) {
     for v in x.iter_mut() {
-        *v *= 1.0 / (1.0 + (-*v).exp());
+        *v = silu_one(*v);
     }
+}
+
+/// SiLU activation (single value): x * sigmoid(x)
+#[inline]
+pub fn silu_one(x: f32) -> f32 {
+    x / (1.0 + (-x).exp())
 }
 
 /// Add two vectors element-wise.

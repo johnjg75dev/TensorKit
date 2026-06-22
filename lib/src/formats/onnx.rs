@@ -360,7 +360,7 @@ impl Model for OnnxFile {
 // Block index extraction from ONNX tensor naming conventions
 // ---------------------------------------------------------------------------
 
-fn block_index_from_name_onnx(name: &str) -> Option<i32> {
+pub fn block_index_from_name_onnx(name: &str) -> Option<i32> {
     // Common ONNX patterns:
     //   layer.N.*          →  N
     //   blocks.N.*         →  N
